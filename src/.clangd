@@ -1,0 +1,28 @@
+# The kernel is built with GCC; drop GCC-only flags so clangd can parse.
+CompileFlags:
+  Remove:
+    - -mpreferred-stack-boundary=*
+    - -mindirect-branch=*
+    - -mindirect-branch-register
+    - -mfunction-return=*
+    - -mharden-sls=*
+    - -mrecord-mcount
+    - -mskip-rax-setup
+    - -fno-allow-store-data-races
+    - -fzero-init-padding-bits=*
+    - -fdiagnostics-show-context=*
+    - -fmin-function-alignment=*
+    - -fconserve-stack
+    - -fno-ipa-sra
+    - -fno-var-tracking-assignments
+    - -falign-jumps=*
+    - -falign-loops=*
+    - -fsanitize=*
+    - -fno-tree-loop-*
+    - -fstrict-flex-arrays=*
+Diagnostics:
+  # kernel headers confuse clangd; the GCC kernel build is authoritative
+  Suppress: ["*"]
+  UnusedIncludes: None
+  ClangTidy:
+    Remove: ["*"]
