@@ -2,13 +2,13 @@
 # Run as root: sudo WIFI_CON=... WIFI_BSSID=... tools/crypto_ab.sh
 # HW crypto vs SW crypto (ax52) vs rtw89, interleaved with an
 # ethernet reference so internet variance can be factored out. Ends on rtw89.
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 PCI=${AX52_PCI:-$(lspci -Dn -d 10ec:b852 | awk 'NR==1{print $1}')}
 IF=${WIFI_IF:-$(ls /sys/bus/pci/devices/$PCI/net 2>/dev/null | head -1)}
 CON=${WIFI_CON:?set WIFI_CON to the NetworkManager connection name}
 AP=${WIFI_BSSID:?set WIFI_BSSID to the access point to pin (lowercase)}
 wait_assoc() {
-	for i in $(seq 1 90); do
+	for _ in $(seq 1 90); do
 		ip -4 addr show $IF 2>/dev/null | grep -q inet && iw dev $IF link 2>/dev/null | grep -q Connected && break
 		sleep 1
 	done
@@ -17,7 +17,7 @@ wait_assoc() {
 }
 phase() {
 	echo "=== $1"
-	for r in 1 2 3; do
+	for _ in 1 2 3; do
 		tools/cryptotest.sh eno1 1 | tail -1 | sed "s/^rep 1/  eth  /"
 		tools/cryptotest.sh $IF 1 | tail -1 | sed "s/^rep 1/  wifi /"
 	done

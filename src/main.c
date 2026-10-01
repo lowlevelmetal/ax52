@@ -8,6 +8,10 @@
 
 #include "ax52.h"
 
+#ifndef AX52_VERSION
+#define AX52_VERSION "unknown"
+#endif
+
 /* Power on and boot the firmware (every interface-up and at probe). */
 static int power_up_fw(struct ax52_dev *rd)
 {
@@ -167,7 +171,8 @@ static int ax52_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 				 PCI_EXP_DEVCTL2_COMP_TMOUT_DIS);
 
 	rd->cv = rd32_mask(rd, REG_SYS_CFG1, SYS_CFG1_CHIP_VER_MASK);
-	ax52_info(rd, "RTL8852B cut %c (cv %u)\n", 'A' + rd->cv, rd->cv);
+	ax52_info(rd, "RTL8852B cut %c (cv %u), ax52 version %s\n",
+		  'A' + rd->cv, rd->cv, AX52_VERSION);
 
 	ret = ax52_pci_alloc_rings(rd);
 	if (ret)
@@ -178,6 +183,9 @@ static int ax52_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = ax52_probe_bringup(rd);
 	if (ret)
 		goto err_fw;
+	if (rd->cv != 1 || rd->efuse.rfe_type != 1)
+		ax52_warn(rd, "untested hardware (cut %c, RFE %u); only cut B / RFE 1 has been tested, please report results\n",
+			  'A' + rd->cv, rd->efuse.rfe_type);
 
 	ret = ax52_phy_alloc(rd) ?: ax52_rfk_alloc(rd) ?: ax52_h2c_alloc(rd);
 	if (ret)
@@ -260,3 +268,4 @@ module_pci_driver(ax52_pci_driver);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Independent driver for the Realtek RTL8852BE 802.11ax PCIe NIC");
 MODULE_FIRMWARE(AX52_FW_NAME);
+MODULE_VERSION(AX52_VERSION);

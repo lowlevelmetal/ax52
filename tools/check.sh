@@ -5,6 +5,7 @@ since="${1:-10 min ago}"
 PCI=${AX52_PCI:-$(lspci -Dn -d 10ec:b852 | awk 'NR==1{print $1}')}
 dev=$(ls /sys/bus/pci/devices/$PCI/net 2>/dev/null | head -1)
 echo "== driver: $(basename "$(readlink /sys/bus/pci/devices/$PCI/driver 2>/dev/null)" 2>/dev/null)  netdev: ${dev:-none}"
+echo "== ax52 version: $(cat /sys/module/ax52/version 2>/dev/null || echo 'not loaded')  kernel: $(uname -r)"
 if [ -n "$dev" ]; then
 	ip -br link show "$dev"
 	iw dev "$dev" info 2>/dev/null | grep -E 'channel|txpower|type'

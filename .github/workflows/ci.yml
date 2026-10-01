@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # Weekly, so a new kernel release that breaks the build is noticed early.
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Build and static checks
+    runs-on: ubuntu-latest
+    # Arch tracks the latest stable kernel, which is what ax52 targets.
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain, kernel headers and checkers
+        run: >-
+          pacman -Syu --noconfirm --needed
+          base-devel git kmod linux-headers pahole sparse shellcheck ruff
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # for the git-describe module version
+
+      - name: Prepare
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          for d in /usr/lib/modules/*/build; do echo "KDIR=$d" >> "$GITHUB_ENV"; break; done
+
+      - name: make check
+        run: make check KDIR="$KDIR"
+
+      - name: Module info
+        run: modinfo src/ax52.ko
