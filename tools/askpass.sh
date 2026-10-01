@@ -1,3 +1,4 @@
 #!/bin/sh
-# Graphical password prompt for `sudo -A` (used because Claude Code's ! prefix has no TTY).
-exec zenity --password --title="sudo: ax52 project"
+# SUDO_ASKPASS helper: graphical password prompt for `sudo -A`, for running the
+# root-only tools from environments without a terminal (IDEs, automation).
+exec zenity --password --title="sudo: ax52"

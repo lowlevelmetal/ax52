@@ -1,0 +1,54 @@
+name: Hardware test report
+description: Report how ax52 behaves on your RTL8852BE, working or not.
+labels: [hardware-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ax52 has only been tested on one card (cut B, RFE type 1). Reports from other
+        cards, especially other chip cuts, RFE types or the 10ec:b85b ID, tell us what
+        can be listed as working. Follow docs/TESTING.md for the test steps.
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Laptop or card model, and `lspci -nn -d 10ec:`
+    validations:
+      required: true
+
+  - type: textarea
+    id: hw
+    attributes:
+      label: Hardware lines from the kernel log
+      description: "`journalctl -k -b | grep -E 'ax52.*(cut|firmware|efuse|untested)'`"
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ax52 version and kernel
+      description: "`modinfo -F version src/ax52.ko` and `uname -r`"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: results
+    attributes:
+      label: What worked
+      options:
+        - label: Module loads, no errors in the kernel log
+        - label: Scan shows networks on 2.4 GHz
+        - label: Scan shows networks on 5 GHz
+        - label: Association and DHCP on 2.4 GHz
+        - label: Association and DHCP on 5 GHz
+        - label: 80 MHz link at HE (Wi-Fi 6) rates
+        - label: Bluetooth still works while ax52 is on 5 GHz
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Throughput and notes
+      description: Anything else, for example tools/speedtest.sh results next to rtw89.

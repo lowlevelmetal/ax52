@@ -1,0 +1,84 @@
+name: Bug report
+description: Something does not work, or the kernel log shows an error.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing ax52. A driver bug can only be fixed with the kernel log and
+        hardware details, so please fill in every field. `tools/check.sh "30 min ago"`
+        collects most of it without root.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      placeholder: |
+        1. sudo tools/drv.sh load
+        2. nmcli con up <connection>
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ax52 version
+      description: "`modinfo -F version src/ax52.ko`, or the commit you built"
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      description: "`uname -r`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: hw
+    attributes:
+      label: Hardware lines from the kernel log
+      description: |
+        The ax52 probe lines: chip cut, firmware version and the efuse line (RFE type).
+        `journalctl -k -b | grep -E 'ax52.*(cut|firmware|efuse)'`
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: link
+    attributes:
+      label: Link
+      description: Band, channel and width, Wi-Fi generation of the access point, security (WPA2/WPA3), module parameters used (swcrypto, fw_log).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: rtw89
+    attributes:
+      label: Does the same setup work with rtw89?
+      options:
+        - "Yes"
+        - "No"
+        - Not tried
+    validations:
+      required: true
+
+  - type: textarea
+    id: check
+    attributes:
+      label: tools/check.sh output
+      description: Run it right after the problem; widen the time window if needed.
+      render: text
+    validations:
+      required: true

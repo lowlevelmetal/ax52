@@ -1,16 +1,20 @@
 # ax52
 
-An independent Linux driver for the **Realtek RTL8852BE** (PCIe 802.11ax, 2T2R,
-PCI ID `10ec:b852`), written from scratch as a learning project.
+[![CI](https://github.com/lowlevelmetal/ax52/actions/workflows/ci.yml/badge.svg)](https://github.com/lowlevelmetal/ax52/actions/workflows/ci.yml)
 
-The upstream `rtw89` driver already supports this chip well; ax52 is not meant to
-replace it. It exists to understand the hardware end to end: every register
-sequence was first written down as a specification (`docs/spec/`), then
-implemented in a new, much smaller code base (~10,500 lines, station mode only).
+ax52 is an independent Linux driver for the **Realtek RTL8852BE** (PCIe 802.11ax,
+2T2R). It is a separate implementation from the in-kernel `rtw89` driver: a
+compact, station-only code base (~10,500 lines) built from a documented hardware
+specification ([`docs/spec/`](docs/spec/)). Every register sequence in that
+specification is resolved for this chip and traced to its source.
 
-> **Status: experimental.** It works on the author's hardware, but it drives DMA
-> and RF hardware directly — a bug can hang the machine. Keep a wired connection
-> and expect to reboot.
+rtw89 also supports this chip. ax52 can take over a single device at runtime and
+hand it back (`tools/drv.sh`), so switching between the two needs no reinstall.
+
+> **Status: experimental.** ax52 has been tested on one hardware configuration
+> (see [Hardware](#hardware)). It programs DMA and RF hardware directly, so a driver
+> bug can hang the machine: keep a wired connection while testing, and expect to
+> reboot.
 
 ## What works
 
@@ -39,28 +43,67 @@ rtw89 as the same performance class, not one as faster.
 beamformee, TX A-MSDU, hardware BIP, full Bluetooth coexistence (while ax52 is on
 2.4 GHz the on-chip Bluetooth loses the shared antenna; on 5 GHz it is unaffected).
 
+## Hardware
+
+ax52 binds the same PCI IDs as rtw89's 8852BE driver: `10ec:b852` and `10ec:b85b`.
+Only one configuration has been tested: chip cut B with RFE type 1 (see the table
+in [docs/TESTING.md](docs/TESTING.md)). On any other cut or RFE type the driver
+logs an "untested hardware" warning. Reports from such cards, working or not, are
+very welcome as a
+[hardware test report](https://github.com/lowlevelmetal/ax52/issues/new?template=hardware_report.yml).
+
 ## Building and trying it
 
-Requirements: kernel headers for the running kernel, and
-`rtw89/rtw8852b_fw-2.bin` from linux-firmware (ax52 uses the same firmware as rtw89).
+Requirements:
+
+- Kernel headers for Linux 7.2, the version ax52 is developed and tested on. It uses
+  recent mac80211 interfaces (for example the `radio_idx` argument of `.config`), so
+  older kernels will not build it. CI also builds against the newest Arch kernel
+  every week.
+- `rtw89/rtw8852b_fw-2.bin` from linux-firmware. ax52 uses the same firmware as
+  rtw89 and takes its PHY and TX-power tables from that file.
 
 ```sh
-make -C src                  # builds src/ax52.ko for the running kernel
+make                         # builds src/ax52.ko for the running kernel
 sudo tools/drv.sh load       # unbind rtw89 from the card, load ax52
 tools/check.sh               # link state + kernel log (no root needed)
 sudo tools/drv.sh restore    # unload ax52, reset the card, rebind rtw89
 ```
 
 `drv.sh` binds ax52 only to the one device (via `driver_override`) and never
-installs anything, so a reboot always returns the card to rtw89. Module
-parameter `swcrypto=1` keeps all keys in software; `fw_log=1` enables firmware
-log events.
+installs anything, so a reboot always returns the card to rtw89. Use
+`make KVER=<version>` to build for another installed kernel, and `make check` to run
+the same static checks as CI.
+
+Module parameters (`sudo tools/drv.sh load swcrypto=1`):
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `swcrypto` | 0 | Keep all keys in mac80211 software crypto. Writable at runtime; applies to keys installed afterwards. |
+| `fw_log` | 0 | Enable firmware log events, printed with dynamic debug. Load time only. |
 
 Benchmark helpers (throughput is measured over the Wi-Fi interface only):
 `tools/abtest.sh`, `tools/cryptotest.sh`, `tools/speedtest.sh`
 (`WIFI_CON=<NetworkManager connection>`), and `tools/crypto_ab.sh`
 (`sudo WIFI_CON=… WIFI_BSSID=… tools/crypto_ab.sh` runs HW crypto vs SW crypto
-vs rtw89 back to back, ending on rtw89).
+vs rtw89 back to back, ending on rtw89). [docs/TESTING.md](docs/TESTING.md) has the
+full test procedure.
+
+## Reporting problems
+
+Use the [bug report form](https://github.com/lowlevelmetal/ax52/issues/new?template=bug_report.yml).
+Include the output of `tools/check.sh "30 min ago"` right after the problem. It
+prints the driver version, link state and the relevant kernel log lines. For
+security issues, see [SECURITY.md](SECURITY.md).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the driver is organised: lifecycle, contexts and locking, data path, firmware interface |
+| [docs/TESTING.md](docs/TESTING.md) | Static checks, the hardware test procedure, debug output, tested configurations |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Spec-first workflow, style, commits |
+| [docs/spec/](docs/spec/) | The hardware specification ax52 implements, one document per subsystem |
 
 ## Layout
 
@@ -77,18 +120,20 @@ vs rtw89 back to back, ending on rtw89).
 | `src/h2c.c` | Firmware command protocol (H2C/C2H) |
 | `src/tx.c`, `src/rx.c` | Frame descriptors, TX scheduling/status, RX status, signal strength |
 | `src/mac80211.c` | mac80211 operations and capabilities |
-| `docs/spec/` | The hardware specification ax52 was written from (8 subsystems) |
+| `docs/spec/` | Hardware specification (8 tracks) and a firmware-file parser |
 | `tools/` | Driver swapping, status and benchmark scripts |
+| `Makefile` | Top-level build and `make check` (the kbuild file is `src/Makefile`) |
+| `.github/` | CI workflow, issue forms, pull request template |
 
-## How it was made
+## Design
 
-`docs/spec/` documents the RTL8852BE programming model — power sequences,
-firmware format and download, DMA descriptors, firmware commands, PHY tables and
-channel programming, RF calibration and the mac80211 integration — resolved
-specifically for this chip and cross-referenced (`file:line`) to rtw89 in Linux
-v7.2.7. The driver was then written against that specification with its own
-structure; register values, table data and firmware command layouts are hardware
-facts shared with rtw89.
+ax52 is developed specification-first. [`docs/spec/`](docs/spec/) documents the
+RTL8852BE programming model: power sequences, firmware format and download, DMA
+descriptors, firmware commands, PHY tables and channel programming, RF calibration
+and the mac80211 integration. It is resolved for this chip and cross-referenced
+(`file:line`) to rtw89 in Linux v7.2.7. The driver implements that specification in
+its own structure ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). Register values,
+table data and firmware command layouts are hardware facts shared with rtw89.
 
 To follow the citations, check out the referenced sources:
 
