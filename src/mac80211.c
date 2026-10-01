@@ -152,7 +152,11 @@ static int ax52_op_start(struct ieee80211_hw *hw)
 
 static void ax52_op_stop(struct ieee80211_hw *hw, bool suspend)
 {
-	ax52_chip_stop(hw->priv);
+	struct ax52_dev *rd = hw->priv;
+
+	/* firmware recovery may have stopped the radio already */
+	if (rd->running)
+		ax52_chip_stop(rd);
 }
 
 static int ax52_op_add_interface(struct ieee80211_hw *hw,
@@ -164,10 +168,15 @@ static int ax52_op_add_interface(struct ieee80211_hw *hw,
 
 	if (rd->vif || vif->type != NL80211_IFTYPE_STATION || vif->p2p)
 		return -EOPNOTSUPP;
+	if (!rd->running)	/* recovery gave up; restart the interface */
+		return -EIO;
 
 	memset(rv, 0, sizeof(*rv));
 	bitmap_zero(rd->sec_cam_map, AX52_SEC_CAM_NUM);
 	memset(rd->tid_rx, 0, sizeof(rd->tid_rx));
+	/* also after a firmware restart, which replays from here */
+	ax52_tx_ba_reset(rd);
+	ax52_mac_set_agg_limit(rd, 0x3F);
 	ether_addr_copy(rv->addr, vif->addr);
 	rd->vif = vif;
 
@@ -203,7 +212,8 @@ static int ax52_op_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 	struct ax52_dev *rd = hw->priv;
 	int ret;
 
-	if (!(changed & IEEE80211_CONF_CHANGE_CHANNEL))
+	/* stopped by recovery: the restart programs the channel again */
+	if (!(changed & IEEE80211_CONF_CHANGE_CHANNEL) || !rd->running)
 		return 0;
 
 	ret = ax52_phy_set_channel(rd, &hw->conf.chandef);
@@ -319,6 +329,8 @@ static int ax52_op_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		return -EINVAL;
 	rd->edca[ac] = *params;
 	rd->edca_valid |= BIT(ac);
+	if (!rd->running)	/* stopped by recovery; sent again on restart */
+		return 0;
 	return ax52_h2c_edca(rd, &rd->rvif, ac, params);
 }
 
@@ -341,15 +353,27 @@ static int ax52_op_sta_state(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		rv->assoc = false;
 		rv->aid = 0;
 		rv->net_type = 0;
-		rd->ba_tried = 0;
-		rd->ba_pending = 0;
-		memset(rd->agg_num, 0, sizeof(rd->agg_num));
+		ax52_tx_ba_reset(rd);
 		ax52_mac_set_agg_limit(rd, 0x3F);
 		ax52_h2c_assoc_cmac_tbl(rd, rv, vif, sta);
 		ax52_h2c_join_info(rd, rv, true);
 		ax52_h2c_addr_cam(rd, rv, vif, sta);
 	}
 	return 0;
+}
+
+/*
+ * Push every queued frame out of the driver and the hardware: the TXQ
+ * worker, the rings (fetched by DMA), the packet engine (transmitted), then
+ * the release reports already delivered, so mac80211 sees their status.
+ */
+static void ax52_flush_tx(struct ax52_dev *rd)
+{
+	flush_delayed_work(&rd->txq_work);
+	ax52_pci_flush(rd);
+	if (ax52_mac_wait_txq_empty(rd))
+		ax52_dbg(rd, "TX queues not empty after flush\n");
+	ax52_pci_tx_complete(rd);
 }
 
 /* ------------------------------------------------------------ crypto */
@@ -439,9 +463,8 @@ static int ax52_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 		if (!test_bit(key->hw_key_idx, rd->sec_cam_map))
 			return 0;
 		/* nothing queued may still reference the key */
-		flush_delayed_work(&rd->txq_work);
-		ax52_pci_flush(rd);
-		ax52_mac_wait_txq_empty(rd);
+		if (rd->running)
+			ax52_flush_tx(rd);
 		for (i = 0; i < ARRAY_SIZE(rv->sec_ent); i++)
 			if ((rv->sec_ent_map & BIT(i)) &&
 			    rv->sec_ent[i] == key->hw_key_idx)
@@ -503,6 +526,8 @@ static void recalc_agg_limit(struct ax52_dev *rd)
 	u8 lmt = 0xff;
 	int tid;
 
+	if (!rd->running)	/* no register access with the chip off */
+		return;
 	for (tid = 0; tid < IEEE80211_NUM_TIDS; tid++)
 		if (rd->agg_num[tid])
 			lmt = min_t(u8, lmt, rd->agg_num[tid] - 1);
@@ -527,18 +552,25 @@ static int ax52_op_ampdu_action(struct ieee80211_hw *hw,
 	case IEEE80211_AMPDU_TX_STOP_FLUSH_CONT:
 		rd->agg_num[p->tid] = 0;
 		recalc_agg_limit(rd);
+		/* the AP or mac80211 ended it: allow a new session later */
+		ax52_tx_ba_retry_later(rd, p->tid);
 		ieee80211_stop_tx_ba_cb_irqsafe(vif, p->sta->addr, p->tid);
 		return 0;
 	case IEEE80211_AMPDU_RX_START:
 		/* static responder entry; hardware falls back to dynamic ones */
-		ax52_h2c_ba_cam(rd, &rd->rvif, p->tid, p->ssn, p->buf_size, true);
+		if (rd->running)
+			ax52_h2c_ba_cam(rd, &rd->rvif, p->tid, p->ssn,
+					p->buf_size, true);
+		WRITE_ONCE(rd->tid_rx[p->tid].started, false);
 		rd->tid_rx[p->tid].last_pn = -1LL;
 		rd->tid_rx[p->tid].last_sn = IEEE80211_SN_MASK;
-		WRITE_ONCE(rd->tid_rx[p->tid].started, true);
+		/* NAPI sees the reset PN state once it sees started */
+		smp_store_release(&rd->tid_rx[p->tid].started, true);
 		return 0;
 	case IEEE80211_AMPDU_RX_STOP:
 		WRITE_ONCE(rd->tid_rx[p->tid].started, false);
-		ax52_h2c_ba_cam(rd, &rd->rvif, p->tid, 0, 0, false);
+		if (rd->running)
+			ax52_h2c_ba_cam(rd, &rd->rvif, p->tid, 0, 0, false);
 		return 0;
 	default:
 		return -EOPNOTSUPP;
@@ -551,7 +583,8 @@ static void ax52_op_sw_scan_start(struct ieee80211_hw *hw,
 	struct ax52_dev *rd = hw->priv;
 
 	rd->scanning = true;
-	ax52_rfk_scan(rd, true);
+	if (rd->running)
+		ax52_rfk_scan(rd, true);
 }
 
 static void ax52_op_sw_scan_complete(struct ieee80211_hw *hw,
@@ -559,21 +592,22 @@ static void ax52_op_sw_scan_complete(struct ieee80211_hw *hw,
 {
 	struct ax52_dev *rd = hw->priv;
 
-	ax52_rfk_scan(rd, false);
+	if (rd->running)
+		ax52_rfk_scan(rd, false);
 	rd->scanning = false;
 }
 
+/*
+ * @drop only permits dropping; frames are always sent instead. The
+ * firmware's packet-drop command would only save airtime here.
+ */
 static void ax52_op_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			  u32 queues, bool drop)
 {
 	struct ax52_dev *rd = hw->priv;
 
-	if (!rd->running)
-		return;
-	flush_delayed_work(&rd->txq_work);
-	ax52_pci_flush(rd);
-	if (ax52_mac_wait_txq_empty(rd))
-		ax52_dbg(rd, "TX queues not empty after flush\n");
+	if (rd->running)
+		ax52_flush_tx(rd);
 }
 
 static int ax52_op_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
@@ -631,9 +665,15 @@ static void ax52_reg_notifier(struct wiphy *wiphy,
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct ax52_dev *rd = hw->priv;
 
-	/* TX power limits follow the country; re-apply under the wiphy lock */
-	memcpy(rd->regd_alpha2, req->alpha2, 2);
-	rd->regd_alpha2[2] = 0;
+	/*
+	 * TX power limits follow the country. The notifier does not hold the
+	 * wiphy mutex, so the country is handed over to regd_work, which
+	 * applies it under the mutex like every other TX power change.
+	 */
+	spin_lock(&rd->regd_lock);
+	memcpy(rd->regd_pending, req->alpha2, 2);
+	rd->regd_pending[2] = 0;
+	spin_unlock(&rd->regd_lock);
 	wiphy_work_queue(wiphy, &rd->regd_work);
 }
 
@@ -641,6 +681,9 @@ static void regd_work_fn(struct wiphy *wiphy, struct wiphy_work *w)
 {
 	struct ax52_dev *rd = container_of(w, struct ax52_dev, regd_work);
 
+	spin_lock(&rd->regd_lock);
+	memcpy(rd->regd_alpha2, rd->regd_pending, sizeof(rd->regd_alpha2));
+	spin_unlock(&rd->regd_lock);
 	if (rd->running)
 		ax52_phy_set_txpwr(rd);
 }
@@ -656,9 +699,13 @@ static void track_work_fn(struct wiphy *wiphy, struct wiphy_work *w)
 	ax52_phy_track(rd);
 	if (!rd->scanning)
 		ax52_rfk_track(rd);
+	ax52_pci_tx_reap(rd);
 
-	/* keep FW rate adaptation fed with the current RSSI */
-	if (rd->vif && rd->rvif.assoc) {
+	/*
+	 * Keep FW rate adaptation fed with the current RSSI. Not while
+	 * scanning: the hardware is then on another channel, maybe another band.
+	 */
+	if (rd->vif && rd->rvif.assoc && !rd->scanning) {
 		struct ieee80211_sta *sta;
 
 		rcu_read_lock();
@@ -696,6 +743,7 @@ struct ax52_dev *ax52_alloc_hw(struct device *dev)
 	wiphy_delayed_work_init(&rd->track_work, track_work_fn);
 	wiphy_work_init(&rd->regd_work, regd_work_fn);
 	strscpy(rd->regd_alpha2, "00", sizeof(rd->regd_alpha2));
+	strscpy(rd->regd_pending, "00", sizeof(rd->regd_pending));
 	rd->rx_fltr = AX52_RX_FLTR_DEFAULT;
 	return rd;
 }
@@ -733,8 +781,8 @@ int ax52_register_hw(struct ax52_dev *rd)
 	return ieee80211_register_hw(hw);
 }
 
+/* Stops the radio if it is up; wiphy_unregister runs any pending wiphy work. */
 void ax52_unregister_hw(struct ax52_dev *rd)
 {
 	ieee80211_unregister_hw(rd->hw);
-	wiphy_work_cancel(rd->hw->wiphy, &rd->regd_work);
 }

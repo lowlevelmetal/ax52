@@ -428,13 +428,22 @@ void ax52_mac_set_agg_limit(struct ax52_dev *rd, u8 lmt)
 	mask32(rd, 0xC610, GENMASK(23, 16), lmt);
 }
 
-/* Wait until the packet engine's TX queues are empty. */
+#define REG_DLE_EMPTY0		0x8430
+#define   DLE_EMPTY0_TXQ	0x07FF079F	/* every WDE/PLE TX queue empty */
+
+/* No frame is held in the packet engine's TX queues. */
+bool ax52_mac_txq_empty(struct ax52_dev *rd)
+{
+	return (rd32(rd, REG_DLE_EMPTY0) & DLE_EMPTY0_TXQ) == DLE_EMPTY0_TXQ;
+}
+
+/* Wait (up to 200 ms) until the packet engine's TX queues are empty. */
 int ax52_mac_wait_txq_empty(struct ax52_dev *rd)
 {
-	u32 v;
+	bool empty;
 
-	return read_poll_timeout(rd32, v, (v & 0x07FF079F) == 0x07FF079F,
-				 10000, 200000, false, rd, 0x8430);
+	return read_poll_timeout(ax52_mac_txq_empty, empty, empty, 10000,
+				 200000, false, rd);
 }
 
 /* Port 0 configuration for a station interface. */

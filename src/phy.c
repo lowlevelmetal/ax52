@@ -386,15 +386,21 @@ static int tbl_apply(struct ax52_dev *rd, const struct ax52_reg2_tbl *t,
 	return 0;
 }
 
+#define BB_SIZE			0x10000		/* BB register window */
+
 static void bb_tbl_write(struct ax52_dev *rd, u32 addr, u32 data, void *ctx)
 {
 	/* addresses 0xF9..0xFE are delays */
 	static const u32 delay_us[] = { 1, 5, 50, 1000, 5000, 50000 };
 
-	if (addr >= 0xF9 && addr <= 0xFE)
+	if (addr >= 0xF9 && addr <= 0xFE) {
 		fsleep(delay_us[addr - 0xF9]);
-	else if (data != 0xBABECAFE)	/* "leave unchanged" marker */
+	} else if (addr >= BB_SIZE || (addr & 3)) {
+		/* the table comes from a file: never write outside the BB */
+		dev_warn_once(rd->dev, "BB table entry for 0x%x ignored\n", addr);
+	} else if (data != 0xBABECAFE) {	/* "leave unchanged" marker */
 		ax52_bb_write(rd, addr, data);
+	}
 }
 
 /*

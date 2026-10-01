@@ -51,14 +51,13 @@ static bool tid_indicate(u8 tid)
 	return tid == 2 || tid == 3 || tid == 5 || tid == 7;
 }
 
-/* Hardware rate code of the lowest bit set in a mac80211 rate bitmap. */
-static u8 lowest_rate(struct ax52_dev *rd, u32 bitmap, u8 fallback)
+/* Hardware rate code of the lowest bit set in a rate bitmap of @band. */
+static u8 lowest_rate(struct ax52_dev *rd, enum nl80211_band band, u32 bitmap,
+		      u8 fallback)
 {
-	struct ieee80211_supported_band *sb =
-		rd->hw->wiphy->bands[rd->chandef.chan ?
-				     rd->chandef.chan->band : NL80211_BAND_2GHZ];
+	struct ieee80211_supported_band *sb = rd->hw->wiphy->bands[band];
 
-	if (!bitmap || !sb)
+	if (!bitmap || !sb || __ffs(bitmap) >= sb->n_bitrates)
 		return fallback;
 	return sb->bitrates[__ffs(bitmap)].hw_value;
 }
@@ -79,7 +78,8 @@ static enum ax52_txq build_wd(struct ax52_dev *rd, struct sk_buff *skb,
 {
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_hdr *hdr = (void *)skb->data;
-	bool is_5g = rd->chan.band == AX52_BAND_5G;
+	enum nl80211_band band = ax52_hw_band(rd);
+	bool is_5g = band == NL80211_BAND_5GHZ;
 	u8 base = (is_5g || (info->flags & IEEE80211_TX_CTL_NO_CCK_RATE)) ?
 		  RATE_OFDM6 : RATE_CCK1;
 	u16 seq = le16_to_cpu(hdr->seq_ctrl) >> 4;
@@ -94,14 +94,19 @@ static enum ax52_txq build_wd(struct ax52_dev *rd, struct sk_buff *skb,
 		struct ieee80211_vif *vif = info->control.vif;
 		u8 rate = base;
 
-		/* lowest basic rate of the BSS once associated */
-		if (vif && vif->cfg.assoc && vif->bss_conf.basic_rates) {
+		/*
+		 * Lowest basic rate of the BSS once associated. The bitmap
+		 * indexes the BSS band's rate table, so it does not apply to
+		 * frames sent on a scan channel of the other band.
+		 */
+		if (vif && vif->cfg.assoc && vif->bss_conf.basic_rates &&
+		    ax52_bss_band(rd, vif) == band) {
 			u32 basic = vif->bss_conf.basic_rates;
 
 			/* 2.4 GHz table entries 0-3 are the CCK rates */
 			if (!is_5g && (info->flags & IEEE80211_TX_CTL_NO_CCK_RATE))
 				basic &= ~0xF;
-			rate = lowest_rate(rd, basic, base);
+			rate = lowest_rate(rd, band, basic, base);
 		}
 
 		q = TXQ_MGMT;
@@ -119,10 +124,10 @@ static enum ax52_txq build_wd(struct ax52_dev *rd, struct sk_buff *skb,
 
 		if (sta) {
 			struct ieee80211_link_sta *ls = &sta->deflink;
-			u8 band = rd->chandef.chan ? rd->chandef.chan->band : 0;
+			enum nl80211_band bss = ax52_bss_band(rd, info->control.vif);
 
 			i1 |= FIELD_PREP(WI1_RTY_LOWEST_RATE,
-					 lowest_rate(rd, ls->supp_rates[band], base));
+					 lowest_rate(rd, bss, ls->supp_rates[bss], base));
 			if ((ls->he_cap.has_he &&
 			     (ls->he_cap.he_cap_elem.phy_cap_info[1] &
 			      IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD)) ||
@@ -202,7 +207,7 @@ void ax52_op_tx(struct ieee80211_hw *hw, struct ieee80211_tx_control *control,
 	struct ax52_dev *rd = hw->priv;
 	int q;
 
-	if (!rd->running) {
+	if (!READ_ONCE(rd->running)) {
 		ieee80211_free_txskb(hw, skb);
 		return;
 	}
@@ -221,14 +226,40 @@ static const enum ax52_txq ac_txq[IEEE80211_NUM_ACS] = {
 	[IEEE80211_AC_BK] = TXQ_ACH1,
 };
 
+/*
+ * TX BA sessions are started by the driver, once per TID. After the session
+ * ends (DELBA, inactivity) or could not be started (e.g. MFP before the
+ * handshake), the TID may try again after BA_RETRY_DELAY; mac80211 spaces
+ * out repeated ADDBA failures itself.
+ */
+#define BA_RETRY_DELAY		(2 * HZ)
+
+void ax52_tx_ba_retry_later(struct ax52_dev *rd, u8 tid)
+{
+	WRITE_ONCE(rd->ba_retry_at[tid], jiffies + BA_RETRY_DELAY);
+	smp_mb__before_atomic();	/* the holdoff is visible first */
+	clear_bit(tid, &rd->ba_tried);
+}
+
 static void maybe_start_ba(struct ax52_dev *rd, struct ieee80211_txq *txq)
 {
 	if (!txq->sta || txq->tid >= IEEE80211_NUM_TIDS ||
 	    !txq->sta->deflink.ht_cap.ht_supported ||
+	    test_bit(txq->tid, &rd->ba_tried) ||
+	    time_before(jiffies, READ_ONCE(rd->ba_retry_at[txq->tid])) ||
 	    test_and_set_bit(txq->tid, &rd->ba_tried))
 		return;
 	set_bit(txq->tid, &rd->ba_pending);
 	queue_work(rd->txq_wq, &rd->ba_work);
+}
+
+/* Forget all TX BA state (new interface or link). */
+void ax52_tx_ba_reset(struct ax52_dev *rd)
+{
+	rd->ba_tried = 0;
+	rd->ba_pending = 0;
+	memset(rd->ba_retry_at, 0, sizeof(rd->ba_retry_at));
+	memset(rd->agg_num, 0, sizeof(rd->agg_num));
 }
 
 static void txq_work_fn(struct work_struct *w)
@@ -240,7 +271,7 @@ static void txq_work_fn(struct work_struct *w)
 	bool more = false;
 	int ac, q;
 
-	if (!rd->running)
+	if (!READ_ONCE(rd->running))
 		return;
 
 	/* dequeued frames carry RCU-protected pointers until handed over */
@@ -281,18 +312,21 @@ static void txq_work_fn(struct work_struct *w)
 static void ba_work_fn(struct work_struct *w)
 {
 	struct ax52_dev *rd = container_of(w, struct ax52_dev, ba_work);
-	struct ieee80211_vif *vif = rd->vif;
-	struct ieee80211_sta *sta;
-	int tid;
-
-	if (!vif || !vif->cfg.assoc)
-		return;
+	struct ieee80211_vif *vif = READ_ONCE(rd->vif);
+	struct ieee80211_sta *sta = NULL;
+	int tid, ret;
 
 	rcu_read_lock();
-	sta = ieee80211_find_sta(vif, vif->bss_conf.bssid);
-	for (tid = 0; sta && tid < IEEE80211_NUM_TIDS; tid++)
-		if (test_and_clear_bit(tid, &rd->ba_pending))
-			ieee80211_start_tx_ba_session(sta, tid, 0);
+	if (vif && vif->cfg.assoc)
+		sta = ieee80211_find_sta(vif, vif->bss_conf.bssid);
+	for (tid = 0; tid < IEEE80211_NUM_TIDS; tid++) {
+		if (!test_and_clear_bit(tid, &rd->ba_pending))
+			continue;
+		ret = sta ? ieee80211_start_tx_ba_session(sta, tid, 0) : -ENOENT;
+		/* -EAGAIN: a session already exists or is being set up */
+		if (ret && ret != -EAGAIN)
+			ax52_tx_ba_retry_later(rd, tid);
+	}
 	rcu_read_unlock();
 }
 

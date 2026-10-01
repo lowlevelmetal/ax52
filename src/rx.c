@@ -195,6 +195,22 @@ static void flush_ppdu(struct ax52_dev *rd)
 		deliver(rd, skb);
 }
 
+/*
+ * A PPDU status can be lost (RX overflow, no skb) or simply never sent. On
+ * a quiet channel the MPDUs waiting for it would otherwise sit in ppdu_q
+ * until the next frame arrives; after AX52_PPDU_WAIT they go up without
+ * signal.
+ */
+bool ax52_rx_ppdu_expire(struct ax52_dev *rd)
+{
+	if (skb_queue_empty(&rd->ppdu_q))
+		return false;
+	if (time_before(jiffies, rd->ppdu_q_ts + AX52_PPDU_WAIT))
+		return true;
+	flush_ppdu(rd);
+	return false;
+}
+
 /* A PPDU status arrived: give its signal to the queued MPDUs it describes. */
 static void rx_ppdu_status(struct ax52_dev *rd, const u8 *desc,
 			   const u8 *p, u32 len)
@@ -281,7 +297,8 @@ static bool rx_pn_valid(struct ax52_dev *rd, struct sk_buff *skb, u32 dw3,
 
 	t = &rd->tid_rx[ieee80211_get_tid(hdr)];
 	hdrlen = ieee80211_hdrlen(hdr->frame_control);
-	if (!READ_ONCE(t->started) || skb->len < hdrlen + 8)
+	/* pairs with the release in ampdu_action(RX_START) */
+	if (!smp_load_acquire(&t->started) || skb->len < hdrlen + 8)
 		return true;
 
 	iv = skb->data + hdrlen;	/* CCMP/GCMP header: PN0 PN1 rsv kid PN2..PN5 */
@@ -377,6 +394,8 @@ void ax52_rx_packet(struct ax52_dev *rd, struct sk_buff *skb)
 				     le32_to_cpu(*(const __le32 *)(desc + 16)));
 
 		if (ftype == 0 || ftype == 2) {
+			if (skb_queue_empty(&rd->ppdu_q))
+				rd->ppdu_q_ts = jiffies;
 			__skb_queue_tail(&rd->ppdu_q, skb);
 			return;
 		}

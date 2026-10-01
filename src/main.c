@@ -62,6 +62,7 @@ int ax52_chip_start(struct ax52_dev *rd)
 {
 	int ret;
 
+	clear_bit(0, &rd->fw_failed);
 	ret = power_up_fw(rd);
 	if (ret)
 		return ret;
@@ -90,6 +91,11 @@ int ax52_chip_start(struct ax52_dev *rd)
 	ax52_mac_set_rx_filter(rd, rd->rx_fltr);
 	ax52_mac_set_rts_threshold(rd, rd->hw->wiphy->rts_threshold);
 
+	/* the firmware stopped answering during bring-up */
+	if (test_bit(0, &rd->fw_failed)) {
+		ret = -EIO;
+		goto err;
+	}
 	ax52_pci_start(rd);
 	ax52_track_start(rd);
 	ax52_info(rd, "radio up\n");
@@ -102,9 +108,11 @@ err:
 	return ret;
 }
 
+/* Called with the wiphy mutex held, only while the radio is running. */
 void ax52_chip_stop(struct ax52_dev *rd)
 {
 	ax52_track_stop(rd);
+	wiphy_work_cancel(rd->hw->wiphy, &rd->recovery_work);
 	ax52_pci_stop(rd);
 	cancel_delayed_work_sync(&rd->txq_work);
 	cancel_work_sync(&rd->ba_work);
@@ -115,6 +123,50 @@ void ax52_chip_stop(struct ax52_dev *rd)
 	ax52_pci_reset(rd);
 	memset(&rd->chandef, 0, sizeof(rd->chandef));
 	ax52_info(rd, "radio down\n");
+}
+
+/* ------------------------------------------------------------ recovery */
+
+#define RECOVERY_MAX		3		/* restarts per window */
+#define RECOVERY_WINDOW		(60 * HZ)
+
+void ax52_fw_failed(struct ax52_dev *rd)
+{
+	WRITE_ONCE(rd->fw_ready, false);
+	if (test_and_set_bit(0, &rd->fw_failed))
+		return;
+	ax52_err(rd, "firmware failure\n");
+	if (READ_ONCE(rd->running))
+		wiphy_work_queue(rd->hw->wiphy, &rd->recovery_work);
+}
+
+/*
+ * The firmware does not come back by itself. Like rtw89's L2 recovery:
+ * stop the radio, drop the per-interface state and let mac80211 start the
+ * device and replay the interface, station and keys.
+ */
+static void ax52_recovery_work(struct wiphy *wiphy, struct wiphy_work *w)
+{
+	struct ax52_dev *rd = container_of(w, struct ax52_dev, recovery_work);
+
+	if (!rd->running)
+		return;
+
+	if (!rd->recovery_cnt ||
+	    time_after(jiffies, rd->recovery_ts + RECOVERY_WINDOW)) {
+		rd->recovery_ts = jiffies;
+		rd->recovery_cnt = 0;
+	}
+	ax52_chip_stop(rd);
+	rd->vif = NULL;		/* mac80211 adds it again */
+
+	if (++rd->recovery_cnt > RECOVERY_MAX) {
+		ax52_err(rd, "firmware failed %d times within %d s; radio stays off until the interface is restarted\n",
+			 RECOVERY_MAX + 1, RECOVERY_WINDOW / HZ);
+		return;
+	}
+	ax52_warn(rd, "restarting the radio\n");
+	ieee80211_restart_hw(rd->hw);
 }
 
 static void ax52_free_subsys(struct ax52_dev *rd)
@@ -137,7 +189,9 @@ static int ax52_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	spin_lock_init(&rd->h2c_lock);
 	spin_lock_init(&rd->tx_lock);
 	spin_lock_init(&rd->irq_lock);
+	spin_lock_init(&rd->regd_lock);
 	__skb_queue_head_init(&rd->ppdu_q);
+	wiphy_work_init(&rd->recovery_work, ax52_recovery_work);
 	ax52_tx_init(rd);
 	pci_set_drvdata(pdev, rd);
 
@@ -156,7 +210,10 @@ static int ax52_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret)
 		goto err_disable;
 
-	/* The upstream AMD bridge is not DAC-capable for this chip: 32-bit DMA. */
+	/*
+	 * 32-bit DMA. The chip can address 36 bits ("DAC"), but rtw89 enables
+	 * that only behind bridges known to handle it; 32 bits work everywhere.
+	 */
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret)
 		goto err_regions;
@@ -235,18 +292,18 @@ static void ax52_pci_remove(struct pci_dev *pdev)
 	ax52_free_hw(rd);
 }
 
-/* Leave no DMA running across reboot/kexec. */
+/*
+ * Leave no DMA, interrupt source or worker running across reboot/kexec:
+ * stop the radio the same way .stop does (NAPI and workers first).
+ */
 static void ax52_pci_shutdown(struct pci_dev *pdev)
 {
 	struct ax52_dev *rd = pci_get_drvdata(pdev);
 
-	if (!rd->mac_on)
-		return;
-	wr32(rd, REG_HIMR0, 0);
-	wr32(rd, REG_PCIE_HIMR00, 0);
-	wr32(rd, REG_PCIE_HIMR10, 0);
-	ax52_pci_deinit(rd);
-	ax52_power_off(rd);
+	wiphy_lock(rd->hw->wiphy);
+	if (rd->running)
+		ax52_chip_stop(rd);
+	wiphy_unlock(rd->hw->wiphy);
 }
 
 static const struct pci_device_id ax52_pci_ids[] = {

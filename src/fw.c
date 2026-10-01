@@ -71,6 +71,7 @@ static int fw_pick_image(struct ax52_dev *rd, const u8 *d, size_t sz,
 	const struct mfw_hdr *mh = (const void *)d;
 	const struct mfw_info *mi = (const void *)(d + sizeof(*mh));
 	const struct mfw_info *best = NULL;
+	u64 last_end;
 	int i, type;
 
 	if (sz < sizeof(*mh) || mh->sig != MFW_SIG || !mh->fw_nr ||
@@ -98,8 +99,10 @@ static int fw_pick_image(struct ax52_dev *rd, const u8 *d, size_t sz,
 
 	*img = d + le32_to_cpu(best->shift);
 	*img_len = le32_to_cpu(best->size);
-	*elem_off = ALIGN(le32_to_cpu(mi[mh->fw_nr - 1].shift) +
-			  le32_to_cpu(mi[mh->fw_nr - 1].size), 16);
+	/* elements follow the last image; past the end means there are none */
+	last_end = (u64)le32_to_cpu(mi[mh->fw_nr - 1].shift) +
+		   le32_to_cpu(mi[mh->fw_nr - 1].size);
+	*elem_off = min_t(u64, ALIGN(last_end, 16), sz);
 	return 0;
 }
 
@@ -148,7 +151,7 @@ static int fw_parse_image(struct ax52_dev *rd, const u8 *img, u32 len)
 	for (i = 0; i < nsec; i++) {
 		const __le32 *s = (const void *)(img + 32 + 16 * i);
 		struct ax52_fw_section *sec = &fw->sec[i];
-		u32 skip = 0;
+		u64 skip = 0, span;
 
 		sec->type = le32_get_bits(s[1], FWSEC_W1_TYPE);
 		sec->len = le32_get_bits(s[1], FWSEC_W1_SIZE);
@@ -161,12 +164,17 @@ static int fw_parse_image(struct ax52_dev *rd, const u8 *img, u32 len)
 				ax52_err(rd, "formatted MSS key pools are not supported\n");
 				return -EOPNOTSUPP;
 			}
-			skip = mssc * FWSEC_SIGLEN;	/* signatures: secure boot only */
+			/* signatures, only used for secure boot */
+			skip = (u64)mssc * FWSEC_SIGLEN;
+		}
+		/* 64-bit, so a hostile size cannot wrap past the image end */
+		span = (u64)sec->len + skip;
+		if (span > (u64)(end - bin)) {
+			ax52_err(rd, "firmware section %u exceeds the image\n", i);
+			return -EINVAL;
 		}
 		sec->data = bin;
-		bin += sec->len + skip;
-		if (bin > end)
-			return -EINVAL;
+		bin += span;
 	}
 	if (bin != end) {
 		ax52_err(rd, "firmware image size mismatch\n");
@@ -186,7 +194,8 @@ static void fw_parse_elements(struct ax52_dev *rd, const u8 *d, size_t sz,
 		const void *payload = d + off + sizeof(*h);
 		struct ax52_reg2_tbl *t = NULL;
 
-		if (off + sizeof(*h) + size > sz) {
+		/* the loop condition guarantees sz > off + sizeof(*h) */
+		if (size > sz - off - sizeof(*h)) {
 			ax52_warn(rd, "truncated firmware element %u\n", id);
 			break;
 		}
@@ -399,7 +408,9 @@ static int fwdl_once(struct ax52_dev *rd)
 	}
 
 	rd->h2c_seq = 0;
-	rd->fw_ready = true;
+	/* a failure seen by an earlier attempt belonged to that firmware */
+	clear_bit(0, &rd->fw_failed);
+	WRITE_ONCE(rd->fw_ready, true);
 	return 0;
 
 fail:

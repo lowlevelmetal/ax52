@@ -64,6 +64,7 @@ struct ax52_bd {
 struct ax52_wd_page {
 	struct sk_buff *skb;	/* frame awaiting its release report */
 	dma_addr_t skb_dma;
+	unsigned long ts;	/* jiffies at submission */
 	bool bd_busy;		/* its BD not yet consumed by the DMA engine */
 };
 
@@ -271,8 +272,8 @@ struct ax52_dev {
 	bool mac_on;
 	bool fw_ready;
 
-	struct ax52_chan chan;	/* current operating channel */
-	char regd_alpha2[3];	/* current regulatory country ("00" = world) */
+	struct ax52_chan chan;	/* channel the hardware is on (scan channel while scanning) */
+	char regd_alpha2[3];	/* regulatory country ("00" = world), wiphy mutex */
 	struct ax52_ra_report ra;
 
 	void *phy_priv;		/* owned by phy.c */
@@ -288,10 +289,12 @@ struct ax52_dev {
 
 	spinlock_t tx_lock;	/* data rings, WD pages (BH) */
 	spinlock_t irq_lock;	/* interrupt masks, running */
-	bool running;		/* interrupts wanted */
+	bool running;		/* radio started; written under irq_lock */
 	struct net_device *napi_dev;
 	struct napi_struct napi;
 	struct sk_buff_head ppdu_q;	/* MPDUs waiting for their PPDU status */
+	unsigned long ppdu_q_ts;	/* jiffies when the oldest one was queued */
+	struct timer_list ppdu_timer;	/* re-polls while MPDUs wait */
 	u8 ppdu_cnt;
 
 	/* TX scheduling */
@@ -301,11 +304,20 @@ struct ax52_dev {
 	bool tx_starved;
 	unsigned long ba_tried;		/* TIDs we tried to start TX BA on */
 	unsigned long ba_pending;	/* TIDs queued for ba_work */
+	unsigned long ba_retry_at[IEEE80211_NUM_TIDS];	/* jiffies, after a stop/failure */
 	u8 agg_num[IEEE80211_NUM_TIDS];	/* negotiated TX BA buffer sizes */
+
+	/* firmware failure recovery (main.c) */
+	unsigned long fw_failed;	/* bit 0: failure seen since the last start */
+	struct wiphy_work recovery_work;
+	unsigned long recovery_ts;	/* start of the current restart window */
+	u8 recovery_cnt;
 
 	/* periodic work, mac80211 state */
 	struct wiphy_delayed_work track_work;
 	struct wiphy_work regd_work;
+	spinlock_t regd_lock;		/* regd_pending */
+	char regd_pending[3];		/* from the notifier, for regd_work */
 	struct ieee80211_vif *vif;	/* the single station interface */
 	struct ax52_vif rvif;
 	u32 rx_fltr;
@@ -329,6 +341,26 @@ struct ax52_dev {
 	struct ax52_fw fw;
 	struct ax52_efuse efuse;
 };
+
+/* Band the hardware is tuned to (the scan channel's while scanning). */
+static inline enum nl80211_band ax52_hw_band(struct ax52_dev *rd)
+{
+	return READ_ONCE(rd->chan.band) == AX52_BAND_5G ? NL80211_BAND_5GHZ :
+							  NL80211_BAND_2GHZ;
+}
+
+/*
+ * Band of the BSS @vif belongs to. Rate bitmaps (basic rates, the AP's
+ * supported rates) index this band's rate table, not the scan channel's.
+ */
+static inline enum nl80211_band ax52_bss_band(struct ax52_dev *rd,
+					      struct ieee80211_vif *vif)
+{
+	const struct ieee80211_channel *c =
+		vif ? vif->bss_conf.chanreq.oper.chan : NULL;
+
+	return c ? c->band : ax52_hw_band(rd);
+}
 
 /* ------------------------------------------------------------ MMIO access */
 
@@ -443,7 +475,9 @@ int ax52_pci_tx_avail(struct ax52_dev *rd, enum ax52_txq q);
 int ax52_pci_tx(struct ax52_dev *rd, enum ax52_txq q, const __le32 *wd,
 		struct sk_buff *skb);
 void ax52_pci_tx_kick(struct ax52_dev *rd, enum ax52_txq q);
-void ax52_pci_flush(struct ax52_dev *rd);
+void ax52_pci_flush(struct ax52_dev *rd);		/* sleeps */
+void ax52_pci_tx_complete(struct ax52_dev *rd);	/* pending release reports */
+void ax52_pci_tx_reap(struct ax52_dev *rd);		/* frames never released */
 
 /* tx.c */
 void ax52_tx_init(struct ax52_dev *rd);
@@ -452,10 +486,15 @@ void ax52_op_tx(struct ieee80211_hw *hw, struct ieee80211_tx_control *control,
 void ax52_op_wake_tx_queue(struct ieee80211_hw *hw, struct ieee80211_txq *txq);
 void ax52_tx_status(struct ax52_dev *rd, struct sk_buff *skb, u8 status);
 void ax52_tx_resources_freed(struct ax52_dev *rd);
+void ax52_tx_ba_retry_later(struct ax52_dev *rd, u8 tid);
+void ax52_tx_ba_reset(struct ax52_dev *rd);
 
 /* rx.c */
 void ax52_rx_packet(struct ax52_dev *rd, struct sk_buff *skb);
 u32 ax52_rx_payload_offset(const u8 *desc, u32 *pkt_len, u8 *type);
+/* End of a NAPI poll: true while MPDUs still wait for their PPDU status. */
+bool ax52_rx_ppdu_expire(struct ax52_dev *rd);
+#define AX52_PPDU_WAIT		msecs_to_jiffies(10)
 
 /* mac80211.c */
 struct ax52_dev *ax52_alloc_hw(struct device *dev);
@@ -468,6 +507,8 @@ void ax52_track_stop(struct ax52_dev *rd);
 /* main.c */
 int ax52_chip_start(struct ax52_dev *rd);
 void ax52_chip_stop(struct ax52_dev *rd);
+/* The firmware stopped working. Any context; restarts the radio. */
+void ax52_fw_failed(struct ax52_dev *rd);
 
 /* mac.c */
 #define AX52_RX_FLTR_DEFAULT	0x030044BE
@@ -478,6 +519,7 @@ void ax52_mac_ppdu_status(struct ax52_dev *rd, bool enable);
 void ax52_mac_set_rx_filter(struct ax52_dev *rd, u32 fltr);
 void ax52_mac_set_rts_threshold(struct ax52_dev *rd, u32 thr);
 void ax52_mac_set_agg_limit(struct ax52_dev *rd, u8 lmt);
+bool ax52_mac_txq_empty(struct ax52_dev *rd);
 int ax52_mac_wait_txq_empty(struct ax52_dev *rd);
 void ax52_mac_port_update(struct ax52_dev *rd, struct ax52_vif *rv,
 			  struct ieee80211_vif *vif);

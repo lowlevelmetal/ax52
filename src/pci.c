@@ -251,50 +251,58 @@ static int mdio_access(struct ax52_dev *rd, u8 addr, u8 page, u16 rw)
 				 rd, REG_MDIO_CFG);
 }
 
-/* Gen1 register bank: page 0 below 0x20, page 1 above. */
-static int mdio_read_g1(struct ax52_dev *rd, u8 addr, u16 *val)
+/* Each speed has its own register bank: page 0/1 (Gen1) or 2/3 (Gen2). */
+static u8 mdio_page(u8 addr, bool gen2)
 {
-	int ret = mdio_access(rd, addr, addr < 0x20 ? MDIO_PAGE_G1_LOW :
-					MDIO_PAGE_G1_HIGH, MDIO_RFLAG);
+	if (gen2)
+		return addr < 0x20 ? MDIO_PAGE_G2_LOW : MDIO_PAGE_G2_HIGH;
+	return addr < 0x20 ? MDIO_PAGE_G1_LOW : MDIO_PAGE_G1_HIGH;
+}
+
+static int mdio_read(struct ax52_dev *rd, u8 addr, bool gen2, u16 *val)
+{
+	int ret = mdio_access(rd, addr, mdio_page(addr, gen2), MDIO_RFLAG);
+
 	if (!ret)
 		*val = rd16(rd, REG_MDIO_RDATA);
 	return ret;
 }
 
-static int mdio_write_g1(struct ax52_dev *rd, u8 addr, u16 val)
+static int mdio_write(struct ax52_dev *rd, u8 addr, bool gen2, u16 val)
 {
 	wr16(rd, REG_MDIO_WDATA, val);
-	return mdio_access(rd, addr, addr < 0x20 ? MDIO_PAGE_G1_LOW :
-			   MDIO_PAGE_G1_HIGH, MDIO_WFLAG);
+	return mdio_access(rd, addr, mdio_page(addr, gen2), MDIO_WFLAG);
 }
 
-static int mdio_mask_g1(struct ax52_dev *rd, u8 addr, u16 mask, u16 field)
+static int mdio_mask(struct ax52_dev *rd, u8 addr, bool gen2, u16 mask,
+		     u16 field)
 {
 	u16 v;
-	int ret = mdio_read_g1(rd, addr, &v);
+	int ret = mdio_read(rd, addr, gen2, &v);
 
 	if (ret)
 		return ret;
 	v = (v & ~mask) | ((field << __ffs(mask)) & mask);
-	return mdio_write_g1(rd, addr, v);
+	return mdio_write(rd, addr, gen2, v);
 }
 
-/* Disable the PCIe reference-clock auto calibration (the link here is Gen1). */
+/* Disable the PCIe reference-clock auto calibration of the current speed. */
 static int refclk_cal_disable(struct ax52_dev *rd)
 {
 	struct pci_dev *pdev = rd->pdev;
 	u8 rate, l1ctrl;
-	bool l1_was_on;
+	bool l1_was_on, gen2;
 	u16 v;
 	int ret;
 
 	pci_read_config_byte(pdev, PCICFG_PHY_RATE, &rate);
-	if ((rate & 0x3) != 1) {
-		/* Gen2 uses another MDIO bank; this board trains Gen1 only. */
+	if ((rate & 0x3) != 1 && (rate & 0x3) != 2) {
+		/* rtw89 fails the bring-up here; the tweak is not essential */
 		ax52_warn(rd, "PCIe link rate code %u, skipping refclk cal tweak\n",
 			  rate & 3);
 		return 0;
 	}
+	gen2 = (rate & 0x3) == 2;
 
 	pci_read_config_byte(pdev, PCICFG_L1_CTRL, &l1ctrl);
 	l1_was_on = l1ctrl & PCICFG_L1_CTRL_ASPM_L1;
@@ -302,9 +310,9 @@ static int refclk_cal_disable(struct ax52_dev *rd)
 		pci_write_config_byte(pdev, PCICFG_L1_CTRL,
 				      l1ctrl & ~PCICFG_L1_CTRL_ASPM_L1);
 
-	ret = mdio_read_g1(rd, MDIO_RAC_CTRL_PPR_V1, &v);
+	ret = mdio_read(rd, MDIO_RAC_CTRL_PPR_V1, gen2, &v);
 	if (!ret && (v & BAC_CALIB_EN))
-		ret = mdio_write_g1(rd, MDIO_RAC_CTRL_PPR_V1, v & ~BAC_CALIB_EN);
+		ret = mdio_write(rd, MDIO_RAC_CTRL_PPR_V1, gen2, v & ~BAC_CALIB_EN);
 
 	if (l1_was_on)
 		pci_write_config_byte(pdev, PCICFG_L1_CTRL, l1ctrl);
@@ -327,8 +335,9 @@ int ax52_pci_pre_init(struct ax52_dev *rd)
 	set32(rd, REG_SYS_SDIO_CTRL, SDIO_PCIE_DIS_L2_CTRL_LDO_HCI);
 	clr32(rd, REG_SYS_SDIO_CTRL, SDIO_PCIE_DIS_WLSUS_AFT_PDN);
 
-	mdio_mask_g1(rd, MDIO_RAC_REG_REV2, BAC_CMU_EN_DLY_MASK, 1);
-	ret = mdio_mask_g1(rd, MDIO_RAC_REG_FLD_0, BAC_AUTOK_N_MASK, 3);
+	/* these two are always programmed in the Gen1 bank, as rtw89 does */
+	mdio_mask(rd, MDIO_RAC_REG_REV2, false, BAC_CMU_EN_DLY_MASK, 1);
+	ret = mdio_mask(rd, MDIO_RAC_REG_FLD_0, false, BAC_AUTOK_N_MASK, 3);
 	if (ret)
 		return ret;
 	ret = refclk_cal_disable(rd);
@@ -455,6 +464,8 @@ int ax52_fwcmd_tx(struct ax52_dev *rd, const void *hdr, u32 hdr_len,
 			break;
 		if (time_after(jiffies, timeout)) {
 			ax52_err(rd, "FWCMD ring stuck (wp %u rp %u)\n", r->wp, r->rp);
+			/* later H2Cs fail at once instead of waiting here too */
+			ax52_fw_failed(rd);
 			return -EBUSY;
 		}
 		udelay(10);
@@ -486,6 +497,8 @@ static void page_free(struct ax52_dev *rd, enum ax52_txq q, u16 idx)
 {
 	struct ax52_txring *r = &rd->tx[q];
 
+	if (WARN_ON_ONCE(r->nfree >= WD_PAGE_NUM))
+		return;
 	memset(rd->wd[q] + idx * WD_PAGE_SIZE, 0, WD_PAGE_SIZE);
 	r->free_page[r->nfree++] = idx;
 }
@@ -496,7 +509,12 @@ static void txring_reclaim_bd(struct ax52_dev *rd, enum ax52_txq q)
 	struct ax52_txring *r = &rd->tx[q];
 	u16 hw = txring_hw_idx(rd, r);
 
-	if (hw >= TXBD_NUM)	/* all-ones read: device gone, never catch up */
+	/*
+	 * Trust the index only within the BDs in flight: an all-ones read
+	 * (device gone) or a ring cleared under us must not retire BDs, and
+	 * free their pages, that were never submitted.
+	 */
+	if (hw >= TXBD_NUM || ring_dist(r->rp, hw) > ring_dist(r->rp, r->wp))
 		return;
 	while (r->rp != hw) {
 		u16 idx = r->bd2page[r->rp];
@@ -548,6 +566,7 @@ int ax52_pci_tx(struct ax52_dev *rd, enum ax52_txq q, const __le32 *wd,
 	pg = &r->page[idx];
 	pg->skb = skb;
 	pg->skb_dma = dma;
+	pg->ts = jiffies;
 	pg->bd_busy = true;
 
 	/* WD body + info, then the page-sequence tag and one address entry */
@@ -580,19 +599,22 @@ void ax52_pci_tx_kick(struct ax52_dev *rd, enum ax52_txq q)
 	spin_unlock_bh(&rd->tx_lock);
 }
 
-/* Wait (briefly) for every frame ring to be fully fetched by the hardware. */
+#define FLUSH_FETCH_US		20000	/* per ring */
+
+/* Wait until the hardware has fetched every BD of the frame rings. Sleeps. */
 void ax52_pci_flush(struct ax52_dev *rd)
 {
-	int q, i;
+	int q;
+	u16 hw;
 
 	for (q = 0; q < TXQ_FWCMD; q++) {
 		struct ax52_txring *r = &rd->tx[q];
 
-		for (i = 0; i < 100; i++) {
-			if (txring_hw_idx(rd, r) == r->wp)
-				break;
-			udelay(10);
-		}
+		if (read_poll_timeout(txring_hw_idx, hw,
+				      hw == READ_ONCE(r->wp) || hw >= TXBD_NUM,
+				      50, FLUSH_FETCH_US, false, rd, r))
+			ax52_dbg(rd, "flush: ring %d not fetched (hw %u wp %u)\n",
+				 q, hw, READ_ONCE(r->wp));
 	}
 }
 
@@ -713,6 +735,61 @@ static int rpq_poll(struct ax52_dev *rd)
 	return n;
 }
 
+/* Hand the release reports already in the ring to mac80211 now (flush). */
+void ax52_pci_tx_complete(struct ax52_dev *rd)
+{
+	rpq_poll(rd);
+}
+
+#define TX_ORPHAN_AGE		(2 * HZ)
+
+/*
+ * A frame whose BD was fetched long ago, while the packet engine holds no
+ * frames, will not get a release report any more: complete it as dropped,
+ * so a lost report does not pin its WD page and DMA mapping until the
+ * radio stops. Process context, every 2 s.
+ */
+void ax52_pci_tx_reap(struct ax52_dev *rd)
+{
+	struct sk_buff_head done;
+	struct sk_buff *skb;
+	int q, i, n = 0;
+
+	if (!ax52_mac_txq_empty(rd))
+		return;
+	rpq_poll(rd);	/* reports that did arrive win */
+
+	__skb_queue_head_init(&done);
+	spin_lock_bh(&rd->tx_lock);
+	for (q = 0; q < TXQ_FWCMD; q++) {
+		struct ax52_txring *r = &rd->tx[q];
+
+		txring_reclaim_bd(rd, q);
+		for (i = 0; i < WD_PAGE_NUM; i++) {
+			struct ax52_wd_page *pg = &r->page[i];
+
+			if (!pg->skb || pg->bd_busy ||
+			    time_before(jiffies, pg->ts + TX_ORPHAN_AGE))
+				continue;
+			dma_unmap_single(rd->dev, pg->skb_dma, pg->skb->len,
+					 DMA_TO_DEVICE);
+			__skb_queue_tail(&done, pg->skb);
+			pg->skb = NULL;
+			page_free(rd, q, i);
+			n++;
+		}
+	}
+	spin_unlock_bh(&rd->tx_lock);
+
+	if (!n)
+		return;
+	dev_warn_ratelimited(rd->dev, "%d TX frames got no release report, dropped\n",
+			     n);
+	while ((skb = __skb_dequeue(&done)))
+		ax52_tx_status(rd, skb, 3);	/* "MAC ID drop" */
+	ax52_tx_resources_freed(rd);
+}
+
 /* ------------------------------------------------------ frame RX */
 
 static int rxq_poll(struct ax52_dev *rd, int budget)
@@ -812,19 +889,33 @@ static irqreturn_t ax52_irq(int irq, void *data)
 		spin_unlock(&rd->irq_lock);
 		return IRQ_NONE;
 	}
-	intr_disable(rd);
 
+	isr0 = rd32(rd, REG_PCIE_HISR00);
+	if (isr0 == 0xffffffff) {	/* device gone: not ours to handle */
+		spin_unlock(&rd->irq_lock);
+		return IRQ_NONE;
+	}
+	isr0 &= IMR00_NORMAL;
 	halt = rd32(rd, REG_HISR0) & HIMR0_HALT_C2H;
-	isr0 = rd32(rd, REG_PCIE_HISR00) & IMR00_NORMAL;
 	isr1 = rd32(rd, REG_PCIE_HISR10) & HI10_HC10ISR_IND;
+	if (!(halt | isr0 | isr1)) {	/* another device on a shared line */
+		spin_unlock(&rd->irq_lock);
+		return IRQ_NONE;
+	}
+
+	/* masked until NAPI is done; bits set from here on fire again */
+	intr_disable(rd);
 	wr32(rd, REG_HISR0, halt);
 	wr32(rd, REG_PCIE_HISR00, isr0);
 	wr32(rd, REG_PCIE_HISR10, isr1);
 	spin_unlock(&rd->irq_lock);
 
-	if (halt)
-		dev_err_ratelimited(rd->dev, "firmware halted (UDM0 0x%08x)\n",
-				    rd32(rd, REG_UDM0));
+	if (halt) {
+		dev_err_ratelimited(rd->dev, "firmware halted (reason 0x%08x, UDM0 0x%08x)\n",
+				    rd32(rd, REG_HALT_C2H), rd32(rd, REG_UDM0));
+		ax52_fw_failed(rd);
+	}
+	/* rtw89 does not treat these as fatal either */
 	if (isr0 & (HI00_TXDMA_STUCK | HI00_RXDMA_STUCK))
 		dev_warn_ratelimited(rd->dev, "DMA stuck, isr 0x%08x\n", isr0);
 
@@ -836,6 +927,7 @@ static int ax52_napi_poll(struct napi_struct *napi, int budget)
 {
 	struct ax52_dev *rd = container_of(napi, struct ax52_dev, napi);
 	unsigned long flags;
+	bool waiting;
 	int done;
 
 	wr32(rd, REG_PCIE_HISR00, HI00_RPQDMA | HI00_RPQBD_FULL);
@@ -843,14 +935,26 @@ static int ax52_napi_poll(struct napi_struct *napi, int budget)
 
 	wr32(rd, REG_PCIE_HISR00, HI00_RXDMA | HI00_RXP1DMA | HI00_RDU);
 	done = rxq_poll(rd, budget);
+	waiting = ax52_rx_ppdu_expire(rd);
 
 	if (done < budget && napi_complete_done(napi, done)) {
 		spin_lock_irqsave(&rd->irq_lock, flags);
 		if (rd->running)
 			intr_enable(rd);
 		spin_unlock_irqrestore(&rd->irq_lock, flags);
+		/* poll again if no interrupt brings the PPDU status they wait for */
+		if (waiting)
+			mod_timer(&rd->ppdu_timer, jiffies + AX52_PPDU_WAIT);
 	}
 	return done;
+}
+
+static void ppdu_timer_fn(struct timer_list *t)
+{
+	struct ax52_dev *rd = timer_container_of(rd, t, ppdu_timer);
+
+	if (READ_ONCE(rd->running))
+		napi_schedule(&rd->napi);
 }
 
 int ax52_pci_irq_init(struct ax52_dev *rd)
@@ -861,6 +965,7 @@ int ax52_pci_irq_init(struct ax52_dev *rd)
 	if (!rd->napi_dev)
 		return -ENOMEM;
 	netif_napi_add(rd->napi_dev, &rd->napi, ax52_napi_poll);
+	timer_setup(&rd->ppdu_timer, ppdu_timer_fn, 0);
 
 	ret = pci_alloc_irq_vectors(rd->pdev, 1, 1, PCI_IRQ_MSI | PCI_IRQ_INTX);
 	if (ret < 0)
@@ -885,6 +990,7 @@ void ax52_pci_irq_deinit(struct ax52_dev *rd)
 	if (!rd->napi_dev)
 		return;
 	free_irq(pci_irq_vector(rd->pdev, 0), rd);
+	timer_shutdown_sync(&rd->ppdu_timer);
 	pci_free_irq_vectors(rd->pdev);
 	netif_napi_del(&rd->napi);
 	free_netdev(rd->napi_dev);
@@ -897,7 +1003,7 @@ void ax52_pci_start(struct ax52_dev *rd)
 
 	napi_enable(&rd->napi);
 	spin_lock_irqsave(&rd->irq_lock, flags);
-	rd->running = true;
+	WRITE_ONCE(rd->running, true);
 	intr_enable(rd);
 	spin_unlock_irqrestore(&rd->irq_lock, flags);
 }
@@ -907,10 +1013,12 @@ void ax52_pci_stop(struct ax52_dev *rd)
 	unsigned long flags;
 
 	spin_lock_irqsave(&rd->irq_lock, flags);
-	rd->running = false;
+	WRITE_ONCE(rd->running, false);
 	intr_disable(rd);
 	spin_unlock_irqrestore(&rd->irq_lock, flags);
 	synchronize_irq(pci_irq_vector(rd->pdev, 0));
 	napi_synchronize(&rd->napi);
 	napi_disable(&rd->napi);
+	/* after napi_disable: a late timer can no longer schedule a poll */
+	timer_delete_sync(&rd->ppdu_timer);
 }

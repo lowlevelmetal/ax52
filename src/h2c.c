@@ -174,10 +174,15 @@ int ax52_h2c_send(struct ax52_dev *rd, u8 cat, u8 cls, u8 func,
 	__le32 hdr[2];
 	int ret;
 
-	if (!rd->fw_ready)
+	if (!READ_ONCE(rd->fw_ready))
 		return -ENODEV;
 
 	spin_lock_bh(&rd->h2c_lock);
+	/* the sender before us may have found the firmware dead */
+	if (!READ_ONCE(rd->fw_ready)) {
+		spin_unlock_bh(&rd->h2c_lock);
+		return -ENODEV;
+	}
 	/* AX firmware wants a receive ack requested on every 4th command */
 	if (!(rd->h2c_seq % 4))
 		rack = true;
@@ -291,6 +296,8 @@ static int sch_tx_write(struct ax52_dev *rd, u16 val)
 			return 0;
 		ax52_warn(rd, "TX scheduler 0x%04x not acked by firmware (%d), writing it directly\n",
 			  val, ret ?: -EPROTO);
+		if (ret == -ETIMEDOUT)	/* the mailbox is dead, not just confused */
+			ax52_fw_failed(rd);
 	}
 	wr16(rd, CTN_TXEN, val);
 	return 0;
@@ -870,7 +877,7 @@ int ax52_h2c_edca(struct ax52_dev *rd, struct ax52_vif *rv, u8 ac,
 		  const struct ieee80211_tx_queue_params *p)
 {
 	u32 slot = rd->vif && rd->vif->bss_conf.use_short_slot ? 9 : 20;
-	u32 sifs = rd->chan.band == AX52_BAND_2G ? 10 : 16;
+	u32 sifs = ax52_bss_band(rd, rd->vif) == NL80211_BAND_2GHZ ? 10 : 16;
 	__le32 h[3];
 
 	if (ac >= IEEE80211_NUM_ACS)
@@ -1032,7 +1039,8 @@ int ax52_h2c_ra(struct ax52_dev *rd, struct ax52_vif *rv,
 		ldpc = ls->ht_cap.cap & IEEE80211_HT_CAP_LDPC_CODING;
 	}
 
-	if (rd->chan.band == AX52_BAND_2G) {
+	/* the AP's band, not the scan channel's the hardware may be on */
+	if (ax52_bss_band(rd, vif) == NL80211_BAND_2GHZ) {
 		u32 r = ls->supp_rates[NL80211_BAND_2GHZ];
 
 		mask |= r;
