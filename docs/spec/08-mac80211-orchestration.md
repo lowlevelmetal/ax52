@@ -1,6 +1,6 @@
 # 08 — Orchestration, mac80211 glue, capability advertisement (RTL8852BE)
 
-Track 08 of the RTL8852BE study. Scope: how rtw89 is assembled for 8852B-on-PCIe,
+Track 08 of the RTL8852BE specification. Scope: how rtw89 is assembled for 8852B-on-PCIe,
 the order in which hardware/firmware operations happen (probe, `.start`, `.stop`,
 interface/station lifecycle), what every `ieee80211_ops` callback does, what is
 advertised to mac80211/cfg80211, regulatory hooks, deferred work and locking, and a
@@ -19,7 +19,7 @@ Conventions
 - Per-port MAC registers are at `base + port * 0x40` (mac.h:1207); band-1 (MAC_1)
   copies are at `+0x2000` (mac.h:590). 8852B only uses MAC_0/PHY_0 and port 0 for a
   single station.
-- "FW 0.29.29.18" is the firmware loaded on the target machine (see 00-BRIEF).
+- "FW 0.29.29.18" is the firmware of the reference system (see README.md).
 
 ---------------------------------------------------------------------------------
 
@@ -38,7 +38,7 @@ Conventions
 3. **With FW 0.29.29.18, rtw89 runs in real channel-context mode and uses
    firmware hardware scan.** `no_chanctx` is false because 8852B has
    `support_chanctx_num = 2` and the firmware has both SCAN_OFFLOAD (≥0.29.29.0) and
-   BEACON_FILTER (≥0.29.29.7) (core.c:7557-7570, fw.c:874-875). So on this machine
+   BEACON_FILTER (≥0.29.29.7) (core.c:7557-7570, fw.c:874-875). So on the reference system
    `sw_scan_start`/`sw_scan_complete` are never called. The legacy `.config`
    channel path together with mac80211's `ieee80211_emulate_*chanctx` helpers is the
    path rtw89 uses for older firmware. It is fully supported and is the recommended
@@ -373,7 +373,7 @@ firmware).
    all TX/RX BD/WD rings; H2C skb queue; `irq_lock`, `trx_lock`. [HW-alloc] (track 01).
 6. **`rtw89_chip_info_setup()`** (core.c:7279-7334):
    1. [HW] `rtw89_read_chip_ver()` (core.c:7030):
-      - `hal.cv = R_AX_SYS_CFG1 (0x00F0) bits[15:12]` (target machine: 1 = CBV).
+      - `hal.cv = R_AX_SYS_CFG1 (0x00F0) bits[15:12]` (reference system: 1 = CBV).
       - `hal.acv = XTAL-SI reg 0x41 (XTAL_SI_CV) bits[3:0]`.
       - CID/AID are BE-only (both remain 0).
    2. [HW] `rtw89_mac_pwr_on()` (mac.c:1586): `power_switch(true)` → `reset_pwr_state`
@@ -433,13 +433,13 @@ firmware).
       `rtw89_load_rfe_data_from_fw()` overlays the FW-element TX-power tables, then
       `rtw89_load_txpwr_table(byr_tbl)`.
    9. [SW] `ps_mode = rtw89_update_ps_mode()`: NONE if the `disable_ps_mode=Y`
-      parameter is set (the user's configuration), otherwise CLK_GATED
+      parameter is set (the reference configuration), otherwise CLK_GATED
       (because of NO_LPS_PG).
    10. Logs "chip info CID … CV … RFE …".
    11. [HW] **`rtw89_mac_pwr_off()`**. This runs always, on both success and error
        paths.
 7. [HW] `rtw89_pci_basic_cfg(rtwdev, false)` (pci.c:4605): disable EQ, filter-out,
-   CPL timeout, link config (ASPM), L1SS config. Track 01; the user's platform keeps
+   CPL timeout, link config (ASPM), L1SS config. Track 01; the reference system keeps
    ASPM L1/L1SS/CLKREQ off.
 8. [SW] `rtw89_core_napi_init()` (dummy netdev + NAPI).
 9. [HW] `rtw89_pci_request_irq()` (pci.c:4056): 1 vector (MSI or INTx), threaded IRQ
@@ -498,7 +498,7 @@ Called with the wiphy mutex held. Ordered steps:
 2. `rtw89_chip_bb_preinit()`: NULL for 8852B (`bbmcu_nr == 0`, so it would run
    here, but the op is NULL).
 3. `rtw89_phy_init_bb_afe()` (phy.c:1913): applies the FW-file AFE element if one
-   exists. The 8852B `-2` file has no AFE element (00-BRIEF), so this is a no-op.
+   exists. The 8852B `-2` file has no AFE element (README.md), so this is a no-op.
 4. **`rtw89_mac_init()`** (mac.c:4359-4396). On any failure it calls
    `rtw89_mac_pwr_off`.
    1. `rtw89_mac_partial_init(include_bb = false)`: HCI DMA on; `dmac_pre_init`
@@ -588,7 +588,7 @@ Everything before step 16 runs with interrupts masked. Every H2C sent before ste
 
 The firmware is lost at every `.stop`. Every `.start` downloads it again.
 
-### 3.3 IPS: power-off while idle (active on this machine)
+### 3.3 IPS: power-off while idle (active on the reference system)
 
 These three hooks together mean the chip is powered off while no interface is
 associated or scanning:
@@ -762,7 +762,7 @@ entity mode and programs PHY_0 from chanctx 0 (core.c:563-579).
 
 | Mode | How a channel reaches `rtw89_set_channel` |
 |---|---|
-| **chanctx** (this machine) | `add_chanctx` → `rtw89_config_entity_chandef(idx = first free, &ctx->def)` (chan.c:3348). `assign_vif_chanctx` → set `chanctx_idx`/`assigned`, abort HW scan, move the first active context to index 0, then **`rtw89_set_channel()`** (chan.c:3391-3430). `change_chanctx(WIDTH)` → config + `set_channel` (chan.c:3375). `unassign` → possible MCC stop + `set_channel`. |
+| **chanctx** (reference system) | `add_chanctx` → `rtw89_config_entity_chandef(idx = first free, &ctx->def)` (chan.c:3348). `assign_vif_chanctx` → set `chanctx_idx`/`assigned`, abort HW scan, move the first active context to index 0, then **`rtw89_set_channel()`** (chan.c:3391-3430). `change_chanctx(WIDTH)` → config + `set_channel` (chan.c:3375). `unassign` → possible MCC stop + `set_channel`. |
 | **no_chanctx** (older FW) | ops are `ieee80211_emulate_{add,remove,change,switch_vif}_chanctx`; `assign/unassign = NULL`. mac80211 then delivers channel changes as **`.config(IEEE80211_CONF_CHANGE_CHANNEL)` with `hw->conf.chandef`**. `rtw89_ops_config` copies that into chanctx 0 and calls `rtw89_set_channel()` (mac80211.c:90-94). SW scan and SW ROC use the same path. |
 
 `rtw89_set_channel` → `__rtw89_set_channel(chan0, MAC_0, PHY_0)` (core.c:531-561):
@@ -919,7 +919,7 @@ MU-EDCA (only if `params->mu_edca`, i.e. an HE AP sends an MU-EDCA IE):
 
 ### 4.7 Scanning: HW scan by default; what SW scan needs
 
-- On this machine rtw89 implements `hw_scan` and the firmware has SCAN_OFFLOAD, so
+- On the reference system rtw89 implements `hw_scan` and the firmware has SCAN_OFFLOAD, so
   mac80211 uses **firmware scan offload** (`rtw89_hw_scan_start` +
   `rtw89_hw_scan_offload`; mac80211.c:1279-1320).
 - `sw_scan_*` would only be used if `hw_scan` returned 1 (no SCAN_OFFLOAD).
@@ -1302,7 +1302,7 @@ C2H dispatch (fw.c:8082-8095, mac.c:6159-6201) is split by context:
 
 | Layer | Trigger | With PS disabled | Minimal driver |
 |---|---|---|---|
-| **IPS** (inactive PS) | `CONF_IDLE` → full `core_stop`/`core_start` (ps.c:233-278) | **not** affected by `disable_ps_mode`; active on this machine | skip |
+| **IPS** (inactive PS) | `CONF_IDLE` → full `core_stop`/`core_start` (ps.c:233-278) | **not** affected by `disable_ps_mode`; active on the reference system | skip |
 | **LPS** (802.11 legacy PS via FW) | `rtw89_recalc_lps` sets `lps_enabled` when the only vif is STATION with `vif->cfg.ps`; `track_ps_work`/`track_work` then call `rtw89_enter_lps` → H2C LPS_PARM (class MAC_PS 0x2, func 0x0) + RF PS info + LPS ML info (ps.c:130-199, 362-393) | still used unless userspace turns power_save off, because rtw89 sets SUPPORTS_PS and leaves PS_ON_BY_DEFAULT | skip (do not set SUPPORTS_PS) |
 | **Deep PS** (clock/power gating via RPWM/CPWM, `__rtw89_enter_ps_mode`) | runs only if `ps_mode ≠ NONE` | forced NONE by `disable_ps_mode=Y` | skip |
 
@@ -1532,7 +1532,7 @@ Differences from rtw89:
    subset.
 5. **Coex scoreboard and GNT.** The exact `_write_scbd` bits (0x00AC) and whether BT
    firmware reclaims the antenna when WL uses SW GNT without coex H2Cs were not
-   extracted (coex.c is ~8k lines). This needs a follow-up study if BT must keep
+   extracted (coex.c is ~8k lines). This needs a follow-up track if BT must keep
    working.
 6. **HW scan vs SW scan RX frequency.** The target FW uses HW scan in rtw89, so the
    SW-scan path (`sw_scan_*` + RX freq-from-IE) has not been exercised on this
@@ -1542,5 +1542,5 @@ Differences from rtw89:
    assumed, not verified. The driver should tolerate RX before any channel is set:
    RF is on the table default channel after `.start`.
 8. **Secure boot.** `rtw89_mac_dmac/cmac_tbl_init` are skipped if
-   `fw.sec.secure_boot` is set (efuse-dependent; track 03). Whether this unit is
+   `fw.sec.secure_boot` is set (efuse-dependent; track 03). Whether the reference unit is
    secure-boot is unknown.

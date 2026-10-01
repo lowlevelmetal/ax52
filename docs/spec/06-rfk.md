@@ -1,6 +1,6 @@
 # 06 — RF calibration (RFK) for RTL8852B (PCIe, CV_B, RFE 1)
 
-Study track 6. Scope: everything rtw89 does to calibrate the RTL8852B analog front end.
+Track 06 of the specification. Scope: everything rtw89 does to calibrate the RTL8852B analog front end.
 That covers RCK, DACK (with AFE init, DRCK and ADDCK), RX DCK, IQK (LOK/TXK/RXK), DPK
 (with DPD back-off init and DPK tracking), TSSI (full, scan and scan-end variants, PMAC
 alignment, efuse DE and the thermal table), and the LCK/synth-lock check done during
@@ -61,7 +61,7 @@ Citation shorthands used below:
 * Every `write32_mask` in rtw89 is a read-modify-write, even with mask 0xffffffff
   (core.h:7093-7104). A plain write is equivalent unless the register has read side
   effects; none are known here.
-* **CV**: this machine is CV = 1 = `CHIP_CBV` (core.h:199-200: CHIP_CAV = 0, CHIP_CBV = 1).
+* **CV**: the reference system is CV = 1 = `CHIP_CBV` (core.h:199-200: CHIP_CAV = 0, CHIP_CBV = 1).
   The only CV-dependent RFK step is in DPK KIP restore (§3.7.9).
 * **DBCC** is never enabled for 8852B station use, so `_kpath()` always returns
   `RF_AB = 3` (both paths) (rfk.c:277-293). Every "if kpath == RF_A/RF_B" branch is dead.
@@ -92,7 +92,7 @@ state, issues one-shot commands and reads reports.
       nctl block" (error only).
 2. Load the NCTL table as plain `(addr, data)` 32-bit BB writes (`rtw89_phy_config_bb_reg`).
    Source: `elm_info->rf_nctl` (the **"NCTL" element of rtw8852b_fw-2.bin**, which is
-   present on this machine), else the static `rtw89_8852b_phy_nctl_table` (table.c:13251-14572,
+   present on the reference system), else the static `rtw89_8852b_phy_nctl_table` (table.c:13251-14572,
    8852b.c:1002).
    * The static fallback has 1320 writes spanning 0x8000–0x8cff, 0x8d00–0x94ff, 0x9f04–0x9f2c
      and 0xa200–0xa7ff.
@@ -345,7 +345,7 @@ Each table is an array of `struct rtw89_reg5_def {u8 flag; u8 path; u32 addr; u3
 
 8852B tables only use WM, WRF and DELAY. There is no WS or WC entry. Port them as
 `{op, path, addr, mask, value}` data. Path-B tables are the path-A tables shifted by
-`+0x2000` or `+0x100` with identical values. I verified this programmatically. The single
+`+0x2000` or `+0x100` with identical values. This was verified programmatically. The single
 exception is `tssi_dac_gain_b`, which lacks the first A entry (`0x58b0 bit10 = 1`). That
 entry is immediately overwritten by `0x58b0[11:0] = 0` anyway, so the net effect is identical.
 
@@ -698,7 +698,7 @@ result. `0x8138/0x813c` hold the single-tap coefficient word.
 * bit1 is set (`0x40000002`) on failure together with `0x8124` select = 0.
 * In NB mode (unused) bit1 is ORed onto the measured coefficient.
 
-**My interpretation, not stated in the source:** bit1 means "use the single-tap coefficient
+**Interpretation, not stated in the source:** bit1 means "use the single-tap coefficient
 in 0x8138/0x813c instead of the CFIR table". On failure the result is therefore identity
 correction, i.e. no worse than no IQK. The coefficient bank is 0, selected by
 `0x8104 bit0` and `0x8154 bit3`.
@@ -1256,7 +1256,7 @@ they run before any traffic.
 ### 5.4 Minimal safe handshake for a driver without full coex
 
 This is a recommendation; the rtw89 behaviour it is derived from is documented above. BT is
-active on this machine (USB 0489:e123) and shares the 2.4 GHz path (BTG on S1), so at least
+active on the reference system (USB 0489:e123) and shares the 2.4 GHz path (BTG on S1), so at least
 the following is advisable around IQK, DPK, RX DCK and TSSI alignment:
 
 1. Read `MAC 0xAC`. If bit5 or bit6 (BT RFK run/req) is set, wait: poll every ~40 µs–1 ms
@@ -1374,19 +1374,19 @@ Verification hooks for each stage: the debug readbacks rtw89 prints.
 ## 8. Open questions / uncertainties
 
 1. **NCTL table source.** rtw89 prefers the FW-file "NCTL" element over the static table.
-   I did not diff the two. Use the FW element. It is also unknown whether a mismatched NCTL
+   The two have not been diffed. Use the FW element. It is also unknown whether a mismatched NCTL
    version breaks IQK/DPK silently: there is no version check.
 2. **IQC word bit1 semantics** (0x40000002 on failure) are inferred, not documented.
 3. **PMAC `power[]` units** in TSSI alignment (48/20) and TSSI CW units: assumed 0.25 dB and
    0.125 dB, which fits the `(p0 − p1)·2` factor. Not verified.
 4. **BTG BT-RX side effect** after TSSI alignment (the j = 1 call with `RF_ABCD` switches
-   BTG BT-RX off for 2G). This looks accidental in rtw89. I did not check whether later code
-   re-applies it (`cfg_txrx_path` is called only at init/antenna change).
+   BTG BT-RX off for 2G). This looks accidental in rtw89. Whether later code
+   re-applies it was not checked (`cfg_txrx_path` is called only at init/antenna change).
 5. **The TSSI band-change path enables TSSI without `init_txpwr`/`dck`/`dac_gain`/`slope`
    tables** until the first rfk_channel. Presumably the BB table defaults are adequate; a
    clean driver could run the full table set (without PMAC) at band change instead.
 6. **DACK S0 vs S1 completion logic** (AND vs OR) and the `_addck` S0 write to `0xc1d4[5:4]`
-   look like vendor quirks. I transcribed them verbatim; I did not test whether they matter.
+   look like vendor quirks. They are transcribed verbatim; whether they matter has not been tested.
 7. **RF 0x20 bit8 (SEL2G) is left at 1** after a 2G IQK, because only SEL5G is cleared and
    0x20 is not backed up. It may be harmless.
 8. **Whether FW needs `rf_ntfy_mcc` (GET_MCCCH)** for correct behaviour outside MCC (e.g.

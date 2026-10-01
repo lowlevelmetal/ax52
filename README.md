@@ -5,7 +5,7 @@ PCI ID `10ec:b852`), written from scratch as a learning project.
 
 The upstream `rtw89` driver already supports this chip well; ax52 is not meant to
 replace it. It exists to understand the hardware end to end: every register
-sequence was first written down as a specification (`docs/study/`), then
+sequence was first written down as a specification (`docs/spec/`), then
 implemented in a new, much smaller code base (~10,500 lines, station mode only).
 
 > **Status: experimental.** It works on the author's hardware, but it drives DMA
@@ -77,12 +77,12 @@ vs rtw89 back to back, ending on rtw89).
 | `src/h2c.c` | Firmware command protocol (H2C/C2H) |
 | `src/tx.c`, `src/rx.c` | Frame descriptors, TX scheduling/status, RX status, signal strength |
 | `src/mac80211.c` | mac80211 operations and capabilities |
-| `docs/study/` | The hardware specification ax52 was written from (8 subsystems) |
+| `docs/spec/` | The hardware specification ax52 was written from (8 subsystems) |
 | `tools/` | Driver swapping, status and benchmark scripts |
 
 ## How it was made
 
-`docs/study/` documents the RTL8852BE programming model — power sequences,
+`docs/spec/` documents the RTL8852BE programming model — power sequences,
 firmware format and download, DMA descriptors, firmware commands, PHY tables and
 channel programming, RF calibration and the mac80211 integration — resolved
 specifically for this chip and cross-referenced (`file:line`) to rtw89 in Linux

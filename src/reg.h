@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * RTL8852BE register map (subset used by this driver).
- * Offsets are into PCI BAR2. Values were derived from the study notes in
- * docs/study/ (which cite the rtw89 sources they were checked against).
+ * Offsets are into PCI BAR2. Values come from the hardware specification in
+ * docs/spec/, which cites the rtw89 sources they were checked against.
  */
 #ifndef AX52_REG_H
 #define AX52_REG_H

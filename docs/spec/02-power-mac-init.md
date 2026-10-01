@@ -818,7 +818,7 @@ after `trx_init` and BB/RF table load:
 6. Scoreboard: write 0x00AC per §13.2 with driver bits ACTIVE|ON|BTLOG (e.g. `0x81004003` when the FW
    bits read back as 0: BIT31 toggle | 0x01<<24 | 0x4003), then sleep 1 ms, so BT FW knows WL is on;
    on shutdown clear driver bits and hand the control path back to BT (step 11) — otherwise the BT
-   radio (USB 0489:e123 on this machine) loses the shared S1 2.4 GHz path.
+   radio (USB 0489:e123 on the reference system) loses the shared S1 2.4 GHz path.
 
 Trade-off: with GNT_BT forced 0 the BT controller cannot use the shared antenna while WL is up
 (BT audio/HID will break on 2.4 GHz). The least-intrusive static alternatives rtw89 itself uses are
@@ -832,7 +832,7 @@ relies on the FW TDMA/coex tables to share airtime.
   (FW feature, LPS only), PHY stat/env monitor, **DIG**, **RFK tracking (DPK)**, RA update, **CFO tracking
   (adjusts XTAL cap via XSI 0x04/0x05)**, EDCCA, SAR, rfkill poll (GPIO9). None of these is a MAC-register
   watchdog; DIG/CFO/DPK/thermal belong to the PHY track and matter for link quality, not for the MAC staying alive.
-- `track_ps_work` every 100 ms — LPS only (disabled on this machine).
+- `track_ps_work` every 100 ms — LPS only (disabled on the reference system).
 - FW watchdog is internal to the WCPU (rtw89 only resets APB wrapper before FWDL on 885xB). SER (error
   recovery) is interrupt/C2H-driven (out of scope).
 - **No periodic MAC register access is mandatory for stability.**
@@ -859,7 +859,7 @@ AP beacon/TSF-sync helpers, coex H2C (monreg/slots/drv_info/TDMA), `set_he_obss_
    they are replicated verbatim from `rtw89_mac_cmac_tbl_init`.
 3. Whether the FW coex engine needs at least one DRV_INFO/TDMA-off H2C when the driver forces GNT by SW is
    unverified; rtw89 always sends them. Test with BT active.
-4. Steps 36–38 of power-on depend on efuse autoload + phycap 0x5E9; on this unit the result is unknown until
+4. Steps 36–38 of power-on depend on efuse autoload + phycap 0x5E9; on the reference unit the result is unknown until
    the efuse is dumped (if 0x5E9 == 0xAA they are skipped).
 5. `rtw89_dump_logical_efuse_map` is run on the 96-byte DAV map with the 1216-byte bounds (potential overread
    if no 0xFF terminator) — irrelevant for 8852B parsing but do not copy that bound.

@@ -73,10 +73,10 @@ Relevant chip_info (rtw8852b.c): `h2c_desc_size = txwd_body_size = sizeof(rtw89_
 RX descriptor parser `rtw89_core_query_rxdesc` (core.c:4070-4123), TX descriptor builder
 `rtw89_core_fill_txdesc` for both data and FWCMD (core.c:1600-1621).
 
-### 0.2 This machine (read-only sysfs, 0000:06:00.0)
+### 0.2 Reference system (read-only sysfs, 0000:06:00.0)
 - Upstream bridge 0000:00:02.2 = **AMD 1022:14ba** → not Intel and not ASMedia 0x2806 →
   rtw89 does **not** enable 36-bit DAC; the device runs with the default **32-bit DMA mask** (§1.3).
-  All BD "DMA_HI" fields are therefore 0 on this machine.
+  All BD "DMA_HI" fields are therefore 0 on the reference system.
 - Link: 2.5 GT/s (Gen1) x1 → `auto_refclk_cal` uses PCIE_PHY_GEN1 (MDIO pages 0/1).
 - BAR0 = I/O ports 0xd000-0xd0ff (unused by rtw89); **BAR2 = 64-bit non-prefetchable MMIO,
   1 MiB** (0xdcb00000-0xdcbfffff) — this is the register window.
@@ -133,7 +133,7 @@ core deinit → free hw.
   write fails, fall back to `dma_set_mask_and_coherent(32)`. (If the 36-bit mask call itself fails,
   nothing else is done — default 32-bit stays.)
 - On resume `rtw89_pci_cfg_dac(false)` re-applies BIT(5) if `enable_dac` (pci.c:4607-4608).
-- **This machine: AMD bridge → 32-bit, 0x719 BIT(5) untouched.** DMA high bits in BDs = 0.
+- **Reference system: AMD bridge → 32-bit, 0x719 BIT(5) untouched.** DMA high bits in BDs = 0.
 - BD/addr-info formats carry 8 upper address bits (bits 32-39), so the hardware can address 40 bits
   once DAC is enabled; rtw89 never uses more than 36.
 
@@ -829,7 +829,7 @@ Recommended teardown for a new driver (superset of rtw89, fixing its IRQ-order w
 4. MAC power-off sequence (power track) — halts firmware and the DMAC.
 5. Only now unmap/free RX buffers, WD pools and BD rings (DMA must be stopped first).
 6. Free IRQ vectors, `pci_iounmap`, `pci_release_regions`, `pci_disable_device`.
-7. If the new driver changed any vendor config bit that rtw89 would not set on this machine
+7. If the new driver changed any vendor config bit that rtw89 would not set on the reference system
    (e.g. 0x719 BIT(5) — rtw89 leaves it clear behind an AMD bridge), restore the original value.
 8. `.shutdown`: at minimum perform steps 2-4 (rtw89 does nothing; a device left DMA-active across
    kexec is a hazard).
@@ -879,5 +879,5 @@ Optional / skip for this user:
    design, not stated.
 7. AX RX-desc SHIFT field is ignored by rtw89 (treated as 0); presumably HW never sets it for this
    configuration.
-8. LTR: whether DEVCTL2.LTR_EN is set on this machine was not checked (would require config-space
+8. LTR: whether DEVCTL2.LTR_EN is set on the reference system was not checked (would require config-space
    read); if set, 0x8410-0x841C must read sane values or `mac_init` fails.

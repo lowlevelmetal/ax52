@@ -802,6 +802,6 @@ Optional (quality/regulatory): DIG PD thresholds, CFO tracking, EDCCA tracking, 
 - Whether FW needs the H2C RF-reg upload when the driver does its own (non-offloaded) scanning/power-save was not verified; rtw89 always sends it.
 - `bb_reset_en(true)` clears BB 0x0C3C b9 for both bands but BB 0x2344 b31 only for 2G; 5G relies on §5.4.7 — consistent, but note the asymmetry.
 - Limit/RU example register values in §6.5/6.6 were computed offline from the FW element data with the documented algorithm, not read back from hardware.
-- Per-device efuse values (xtal_k, rx gain offsets, gain comp, thermal/PA trim) were not read from this machine; formulas only.
+- Per-device efuse values (xtal_k, rx gain offsets, gain comp, thermal/PA trim) were not read from the reference system; formulas only.
 - "A-die" (SWSI, addr < 0x100) vs "D-die" (direct, addr | 0x10000) is naming inferred from rtw89 identifiers (`*_rf_a`, `dav` flag, `*_V1` regs); functionally only the access mechanism matters.
 - Logical-efuse offsets quoted here (xtal_k 0x2B9, rx-gain bytes 0x2D4-0x2DC) are derived from `struct rtw8852bx_efuse` (rtw8852b_common.h) layout; cross-check with the efuse track.

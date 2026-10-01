@@ -12,8 +12,8 @@ Module.symvers
 compile_commands.json
 .cache/
 
-# sparse kernel checkout used for study (see README to recreate)
+# sparse rtw89 checkout cited by docs/spec (see README to recreate)
 reference/
 
 # local copy of Realtek's firmware (it ships with linux-firmware)
-docs/study/fwdump/*.bin
+docs/spec/fwdump/*.bin

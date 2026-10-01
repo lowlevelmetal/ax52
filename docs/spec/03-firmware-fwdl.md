@@ -7,9 +7,9 @@ RTL8852B over PCIe. All paths below are relative to
 All multi-byte fields are **little-endian**. Bit ranges are `[hi:lo]` inside a 32-bit LE dword.
 
 Validation artefacts (read-only analysis of a decompressed copy of the real file):
-- `docs/study/fwdump/rtw8852b_fw-2.bin` — `zstd -dc /usr/lib/firmware/rtw89/rtw8852b_fw-2.bin.zst`
-- `docs/study/fwdump/parse_fw.py` — independent parser written from this spec
-- `docs/study/fwdump/parse_fw_output.txt` — its output (`--cv 1 --rfe 1 --table-c rtw8852b_table.c`)
+- `docs/spec/fwdump/rtw8852b_fw-2.bin` — `zstd -dc /usr/lib/firmware/rtw89/rtw8852b_fw-2.bin.zst`
+- `docs/spec/fwdump/parse_fw.py` — independent parser written from this spec
+- `docs/spec/fwdump/parse_fw_output.txt` — its output (`--cv 1 --rfe 1 --table-c rtw8852b_table.c`)
 
 ---------------------------------------------------------------------------------------------
 
@@ -29,7 +29,7 @@ Validation artefacts (read-only analysis of a decompressed copy of the real file
 | fill_txdesc_fwcmd | `rtw89_core_fill_txdesc` (AX WD body, not v1) | rtw8852b.c:914; core.c:1600 |
 | FWDL part size (chunk) | **2020 bytes** fixed for AX (header field ignored/overwritten) | fw.h:287; fw.c:164-167 |
 | FW header version in file | v0 (`hdr_ver`=0) with dynamic header | parse_fw_output.txt |
-| hal.cv | `R_AX_SYS_CFG1 (0x00F0)[15:12]`; this machine: 1 (CHIP_CBV) | core.c:7039-7047; reg.h:195-196 |
+| hal.cv | `R_AX_SYS_CFG1 (0x00F0)[15:12]`; reference system: 1 (CHIP_CBV) | core.c:7039-7047; reg.h:195-196 |
 | hal.aid | stays 0 on AX (only BE reads it) | core.c:7057-7069 |
 | Selected FW | MFW entry #1: type 5 NORMAL_CE, cv 1, offset 0xCF50, size 0x4FC48, FW 0.29.29.18 | §1.3 |
 
@@ -208,7 +208,7 @@ Headline selection for (rfe = efuse RFE type, cv = hal.cv), first hit wins:
 No headlines ⇒ every ordinary line is applied.
 
 RADIO_A/B headlines in the file (RFE,CV): (1,0) (2,0) (1,1) (2,1) (3,1) (4,1) (5,1) (6,1) (7,1) (8,1)
-(0x29,1) (0x2B,1). For this machine (RFE 1, CV 1) target 0x0010001 is selected; resulting applied
+(0x29,1) (0x2B,1). For the reference system (RFE 1, CV 1) target 0x0010001 is selected; resulting applied
 entries: RADIO_A 947, RADIO_B 932 (parse_fw.py emulation).
 
 Application semantics (belong to the PHY/RF track; summarised):
@@ -417,10 +417,10 @@ Security section processing (type 9; fw.c:404-441):
   **last 512 bytes of that single 960-byte packet** (fw.c:208-209, 1660-1666, 1797-1827). Also
   `R_AX_WCPU_FW_CTRL[27:24] = idmem_share_mode, bit23 = 1` before download (mac.c:7417-7428).
 
-**Conclusion for this file / this machine:** every image carries one type-9 section of 2048 B with
+**Conclusion for this file and the reference system:** every image carries one type-9 section of 2048 B with
 MSSC = 0 (no signatures appended). With `secure_boot = true`, rtw89's v0 parser would fail
 (`mss_idx (≥0) >= mssc (0)` → -EFAULT, fw.c:423-428), so any 8852B that successfully loads this
-file (as this machine does, FW 0.29.29.18) has `secure_boot = false`. In that case the security
+file (as the reference system does, FW 0.29.29.18) has `secure_boot = false`. In that case the security
 section is just downloaded as an ordinary 2048-byte section (2 packets), no key selection, no
 idmem-share write, no blacklist check. A new driver can treat 8852B as non-secure; if it wants to be
 defensive, read efuse 0x5EC/0x5ED and refuse (or warn) if they are not 0xFF/0xFF.
@@ -708,7 +708,7 @@ elements @0x130480..EOF 0x17B8A2:
   TXPWR chosen for rfe 1: all rfe_type-0 instances
   PHY element tables identical to rtw8852b_table.c: BB, BB_GAIN, RADIO_A, RADIO_B, NCTL = True
 ```
-Full output: `docs/study/fwdump/parse_fw_output.txt`.
+Full output: `docs/spec/fwdump/parse_fw_output.txt`.
 
 ---------------------------------------------------------------------------------------------
 
@@ -721,7 +721,7 @@ Full output: `docs/study/fwdump/parse_fw_output.txt`.
 3. Whether the ROM really requires CH12's `FW_DL=0` for the header and `FW_DL=1` for data (vs.
    just rtw89 convention) is not verifiable from source; follow rtw89 exactly.
 4. Secure-boot 8852B parts: with this firmware file rtw89 would fail to parse (MSSC=0); it is
-   unclear whether such parts exist with this file in the field. Efuse 0x5EC/0x5ED of this unit
+   unclear whether such parts exist with this file in the field. Efuse 0x5EC/0x5ED of the reference unit
    was not read (live system untouched); success of the current rtw89 load implies non-secure.
 5. The TX-power element values vs. the compiled-in 8852B TX-power tables were not compared
    (only PHY tables were); units/semantics are for the TX-power track.

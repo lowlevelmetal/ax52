@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 """
 Independent parser for Realtek rtw89 "multi-firmware" (MFW) files, written from
-the format description in docs/study/03-firmware-fwdl.md, used to validate that
+the format description in docs/spec/03-firmware-fwdl.md, used to validate that
 description against /usr/lib/firmware/rtw89/rtw8852b_fw-2.bin(.zst).
 
 Usage:
@@ -15,7 +15,6 @@ import argparse
 import os
 import re
 import struct
-import sys
 
 FW_TYPES = {1: "NORMAL", 3: "WOWLAN", 5: "NORMAL_CE", 14: "NORMAL_B",
             15: "WOWLAN_B", 64: "BBMCU0", 65: "BBMCU1", 255: "LOGFMT"}
@@ -130,7 +129,6 @@ def parse_fw_image(d, off, size):
         hdr_len = bits(w[3], 23, 16) if r["dyn_hdr"] else base
         dsp_chk = 0
     elif hdr_ver == 1:
-        w8 = struct.unpack_from("<12I", d, off)
         base = 48 + 16 * r["sec_num"]
         r["build"]["year"] = bits(w[5], 15, 0)
         r["cmd_ver"] = bits(w[7], 23, 16)   # rtw89 reads V1_W3 mask from w7 (sic)
